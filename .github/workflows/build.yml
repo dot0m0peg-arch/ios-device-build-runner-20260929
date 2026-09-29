@@ -1,9 +1,70 @@
-name: macOS runner check
+name: iOS device build
 on:
   workflow_dispatch:
 jobs:
-  smoke:
+  build:
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
-      - name: Check Xcode
-        run: xcodebuild -version
+      - name: Checkout private source
+        uses: actions/checkout@v4
+        with:
+          repository: dot0m0peg-arch/SophiasSightWordsApple-device-build
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          persist-credentials: false
+          path: source
+      - name: Build unsigned device app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          xcodebuild \
+            -project SophiasSightWords.xcodeproj \
+            -scheme SophiasSightWords \
+            -configuration Debug \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/derived" \
+            CODE_SIGNING_ALLOWED=NO \
+            build > "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$RUNNER_TEMP/SophiasSightWords-unsigned.ipa" Payload
+      - name: Encrypt output and diagnostics
+        if: always()
+        shell: bash
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          import os
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          root = Path(os.environ["RUNNER_TEMP"])
+          cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
+          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log"):
+              path = root / name
+              if path.exists():
+                  nonce = os.urandom(12)
+                  (root / (name + ".aesgcm")).write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+          PY
+      - name: Upload encrypted IPA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-ipa
+          path: ${{ runner.temp }}/SophiasSightWords-unsigned.ipa.aesgcm
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Upload encrypted diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-build-log
+          path: ${{ runner.temp }}/xcodebuild.log.aesgcm
+          if-no-files-found: ignore
+          retention-days: 1
