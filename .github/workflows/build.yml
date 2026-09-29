@@ -1,0 +1,9 @@
+name: macOS runner check
+on:
+  workflow_dispatch:
+jobs:
+  smoke:
+    runs-on: macos-15
+    steps:
+      - name: Check Xcode
+        run: xcodebuild -version
