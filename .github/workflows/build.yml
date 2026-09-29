@@ -18,6 +18,7 @@ jobs:
         run: |
           set -euo pipefail
           cd source
+          swift test > "$RUNNER_TEMP/xcodebuild.log" 2>&1
           xcodebuild \
             -project SophiasSightWords.xcodeproj \
             -scheme SophiasSightWords \
@@ -26,7 +27,7 @@ jobs:
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/derived" \
             CODE_SIGNING_ALLOWED=NO \
-            build > "$RUNNER_TEMP/xcodebuild.log" 2>&1
+            build >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
