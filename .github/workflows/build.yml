@@ -51,7 +51,9 @@ jobs:
           set -euo pipefail
           cd source
           mkdir -p "$RUNNER_TEMP/feature-qa"
-          python3 QA/render_train_animation.py "$RUNNER_TEMP/feature-qa/train" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          if [ "${{ inputs.qa_only }}" != "true" ]; then
+            python3 QA/render_train_animation.py "$RUNNER_TEMP/feature-qa/train" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          fi
           python3 QA/render_letter_garden.py "$RUNNER_TEMP/feature-qa/garden" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
       - name: Encrypt output and diagnostics
         if: always()
