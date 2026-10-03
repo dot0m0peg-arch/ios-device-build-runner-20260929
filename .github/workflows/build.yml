@@ -39,6 +39,14 @@ jobs:
           cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
           zip -qry "$RUNNER_TEMP/SophiasSightWords-unsigned.ipa" Payload
+      - name: Render restored game features
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          mkdir -p "$RUNNER_TEMP/feature-qa"
+          python3 QA/render_train_animation.py "$RUNNER_TEMP/feature-qa/train" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          python3 QA/render_letter_garden.py "$RUNNER_TEMP/feature-qa/garden" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
       - name: Encrypt output and diagnostics
         if: always()
         shell: bash
@@ -49,12 +57,14 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
+          import os, shutil
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
           root = Path(os.environ["RUNNER_TEMP"])
+          if (root / "feature-qa").exists():
+              shutil.make_archive(str(root / "feature-qa"), "zip", root / "feature-qa")
           cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
-          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log", "unicorn-preview.png"):
+          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log", "unicorn-preview.png", "feature-qa.zip"):
               path = root / name
               if path.exists():
                   nonce = os.urandom(12)
@@ -82,5 +92,13 @@ jobs:
         with:
           name: encrypted-unicorn-preview
           path: ${{ runner.temp }}/unicorn-preview.png.aesgcm
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Upload encrypted feature checks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-feature-qa
+          path: ${{ runner.temp }}/feature-qa.zip.aesgcm
           if-no-files-found: ignore
           retention-days: 1
