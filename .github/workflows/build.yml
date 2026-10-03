@@ -6,6 +6,11 @@ on:
         description: Private source revision
         required: true
         default: main
+      qa_only:
+        description: Run native feature checks without rebuilding the device app
+        required: false
+        default: false
+        type: boolean
 jobs:
   build:
     runs-on: macos-15
@@ -20,6 +25,7 @@ jobs:
           persist-credentials: false
           path: source
       - name: Build unsigned device app
+        if: ${{ !inputs.qa_only }}
         shell: bash
         run: |
           set -euo pipefail
