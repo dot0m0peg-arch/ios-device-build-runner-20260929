@@ -34,6 +34,7 @@ jobs:
             -derivedDataPath "$RUNNER_TEMP/derived" \
             CODE_SIGNING_ALLOWED=NO \
             build >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
+          python3 QA/render_original_unicorns.py "$RUNNER_TEMP/unicorn-preview.png" >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
@@ -53,7 +54,7 @@ jobs:
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
           root = Path(os.environ["RUNNER_TEMP"])
           cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
-          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log"):
+          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log", "unicorn-preview.png"):
               path = root / name
               if path.exists():
                   nonce = os.urandom(12)
@@ -73,5 +74,13 @@ jobs:
         with:
           name: encrypted-build-log
           path: ${{ runner.temp }}/xcodebuild.log.aesgcm
+          if-no-files-found: ignore
+          retention-days: 1
+      - name: Upload encrypted unicorn preview
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-unicorn-preview
+          path: ${{ runner.temp }}/unicorn-preview.png.aesgcm
           if-no-files-found: ignore
           retention-days: 1
