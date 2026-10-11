@@ -1,77 +1,74 @@
-name: iOS device build
+name: Connor original game shared-race native build
 on:
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: Private source revision
-        required: true
-        default: main
 jobs:
   build:
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 20
+    permissions:
+      contents: read
     steps:
-      - name: Checkout private source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          repository: dot0m0peg-arch/SophiasSightWordsApple-device-build
-          ref: ${{ inputs.source_ref }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
           persist-credentials: false
-          path: source
-      - name: Build unsigned device app
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd source
-          swift test > "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          xcodebuild \
-            -project SophiasSightWords.xcodeproj \
-            -scheme SophiasSightWords \
-            -configuration Debug \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/derived" \
-            CODE_SIGNING_ALLOWED=NO \
-            build >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
-          cd "$RUNNER_TEMP/ipa"
-          zip -qry "$RUNNER_TEMP/SophiasSightWords-unsigned.ipa" Payload
-      - name: Encrypt output and diagnostics
-        if: always()
-        shell: bash
+      - name: Decrypt Connor source
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          import os, io, zipfile
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          raw = Path('connor/source.zip.aesgcm').read_bytes()
+          plain = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX'])).decrypt(raw[:12], raw[12:], None)
+          target = Path(os.environ['RUNNER_TEMP']) / 'connor-source'
+          with zipfile.ZipFile(io.BytesIO(plain)) as z:
+              for name in z.namelist():
+                  path = (target / name).resolve()
+                  if not path.is_relative_to(target.resolve()):
+                      raise ValueError('Source path outside package')
+              z.extractall(target)
+          PY
+      - name: Compile and package bundled iPhone app
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/connor-source"
+          node test-engine.js > "$RUNNER_TEMP/connor-build.log" 2>&1
+          python3 ios/test-native.py . >> "$RUNNER_TEMP/connor-build.log" 2>&1
+          python3 ios/test-race.py >> "$RUNNER_TEMP/connor-build.log" 2>&1
+          bash ios/build-ios.sh . "$RUNNER_TEMP/connor-output" >> "$RUNNER_TEMP/connor-build.log" 2>&1
+      - name: Encrypt output and diagnostics
+        if: always()
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        run: |
+          set -euo pipefail
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
           import os
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          root = Path(os.environ["RUNNER_TEMP"])
-          cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
-          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log"):
+          root = Path(os.environ['RUNNER_TEMP'])
+          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          for name in ['connor-output/Connor-Division-Quest-unsigned.ipa', 'connor-build.log']:
               path = root / name
               if path.exists():
                   nonce = os.urandom(12)
-                  (root / (name + ".aesgcm")).write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+                  (root / (path.name + '.aesgcm')).write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
           PY
-      - name: Upload encrypted IPA
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: encrypted-ipa
-          path: ${{ runner.temp }}/SophiasSightWords-unsigned.ipa.aesgcm
-          if-no-files-found: ignore
+          name: connor-encrypted-device-build
+          path: ${{ runner.temp }}/Connor-Division-Quest-unsigned.ipa.aesgcm
           retention-days: 1
-      - name: Upload encrypted diagnostics
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: encrypted-build-log
-          path: ${{ runner.temp }}/xcodebuild.log.aesgcm
-          if-no-files-found: ignore
+          name: connor-encrypted-build-log
+          path: ${{ runner.temp }}/connor-build.log.aesgcm
           retention-days: 1
+          if-no-files-found: ignore
