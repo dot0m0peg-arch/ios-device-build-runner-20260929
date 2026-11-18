@@ -1,4 +1,4 @@
-name: Apple game portfolio builds
+name: Apple portfolio sandboxed game startup
 on:
   workflow_dispatch:
 permissions:
@@ -12,22 +12,19 @@ jobs:
       max-parallel: 4
       matrix:
         include:
-          - {app: MyPetSnake, scheme: MyPetSnake-Mac, save_app: true}
-          - {app: Timbersack, scheme: Timbersack-iOS, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-Mac, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-iOS, save_app: false}
-          - {app: Miner3D, scheme: Miner3D-Mac, save_app: true}
-          - {app: Miner3D, scheme: Miner3D-iOS, save_app: false}
-          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, save_app: true}
+          - {app: LastCarUpright, scheme: LastCarUpright-Mac}
+          - {app: Miner3D, scheme: Miner3D-Mac}
+          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac}
     env:
       APP_KEY: ${{ matrix.app }}
       SCHEME: ${{ matrix.scheme }}
-      SAVE_APP: ${{ matrix.save_app }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          sparse-checkout: apple-port/${{ matrix.app }}
+          sparse-checkout: |
+            apple-port/${{ matrix.app }}
+            apple-port/probe
       - name: Prepare native build tools
         run: |
           set -euo pipefail
@@ -66,16 +63,32 @@ jobs:
                       raise ValueError('Source entry is outside its directory')
               package.extractall(root)
           PY
-      - name: Compile and verify packaged game resources
+      - name: Launch the sandboxed Mac game and verify WebGL and local storage
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/apple-source"
           product="$root/build/$SCHEME/products/$APP_KEY.app"
-          bash "$root/build-unsigned.sh" "$SCHEME" > "$RUNNER_TEMP/compile.log" 2>&1
-          if [[ "$SAVE_APP" == true ]]; then
-            ditto -c -k --keepParent "$product" "$RUNNER_TEMP/unsigned-app.zip"
-          fi
-          echo "Xcode compiled $SCHEME and verified the bundled payload."
+          output="$RUNNER_TEMP/apple-runtime.txt"
+          errors="$RUNNER_TEMP/apple-runtime-errors.txt"
+          exec > "$RUNNER_TEMP/compile.log" 2>&1
+          python3 apple-port/probe/overlay.py "$root" "$APP_KEY"
+          bash "$root/build-unsigned.sh" "$SCHEME"
+          codesign --force --sign - --timestamp=none \
+              --entitlements "$root/Apps/$APP_KEY/Mac.entitlements" "$product"
+          touch "$output" "$errors"
+          python3 - "$product" "$output" "$errors" <<'PY'
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          product, output, errors = sys.argv[1:]
+          command = ['/usr/bin/open', '-W', '-n', '--stdout', output, '--stderr', errors, product]
+          subprocess.run(command, timeout=110, check=True)
+          text = Path(output).read_text(errors='replace') + Path(errors).read_text(errors='replace')
+          print(text)
+          if 'APPLE_RUNTIME_SMOKE_PASS' not in text:
+              raise SystemExit(1)
+          PY
       - name: Encrypt build and diagnostics
         if: always()
         env:
