@@ -1,77 +1,106 @@
-name: iOS device build
+name: Sophia iPhone simulator smoke check
 on:
   workflow_dispatch:
-    inputs:
-      source_ref:
-        description: Private source revision
-        required: true
-        default: main
+permissions:
+  contents: read
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 30
+    runs-on: macos-26
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        scheme: [SophiasSightWords-iOS]
+    env:
+      SCHEME: ${{ matrix.scheme }}
     steps:
-      - name: Checkout private source
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: dot0m0peg-arch/SophiasSightWordsApple-device-build
-          ref: ${{ inputs.source_ref }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
           persist-credentials: false
-          path: source
-      - name: Build unsigned device app
-        shell: bash
+      - name: Prepare native build tools
         run: |
           set -euo pipefail
-          cd source
-          swift test > "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          xcodebuild \
-            -project SophiasSightWords.xcodeproj \
-            -scheme SophiasSightWords \
-            -configuration Debug \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/derived" \
-            CODE_SIGNING_ALLOWED=NO \
-            build >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
-          cd "$RUNNER_TEMP/ipa"
-          zip -qry "$RUNNER_TEMP/SophiasSightWords-unsigned.ipa" Payload
-      - name: Encrypt output and diagnostics
-        if: always()
-        shell: bash
+          xcodebuild -version
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
+      - name: Decrypt verified game payload
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          import io, os
+          from pathlib import Path
+          from zipfile import ZipFile
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+          data = Path('apple-port/candidate.aesgcm').read_bytes()
+          key = bytes.fromhex(os.environ['IPA_KEY_HEX'])
+          payload = AESGCM(key).decrypt(data[:12], data[12:], None)
+          root = (Path(os.environ['RUNNER_TEMP']) / 'apple-source').resolve()
+          root.mkdir()
+          with ZipFile(io.BytesIO(payload)) as package:
+              for name in package.namelist():
+                  if not (root / name).resolve().is_relative_to(root):
+                      raise ValueError('Game source entry is outside its directory')
+              package.extractall(root)
+          PY
+      - name: Launch on an Apple iPhone simulator
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/apple-source"
+          cd "$root"
+          exec > "$RUNNER_TEMP/compile.log" 2>&1
+          xcodebuild -version
+          device="$(xcrun simctl list devices available -j | python3 -c '
+          import json,sys
+          runtimes=json.load(sys.stdin)["devices"]
+          groups=sorted((k for k in runtimes if ".iOS-" in k),
+                        key=lambda k: tuple(int(p) for p in k.split(".iOS-")[1].split("-")),reverse=True)
+          phones=[d for k in groups for d in runtimes[k] if d["isAvailable"] and "iPhone " in d["name"]]
+          if not phones: raise SystemExit("No supported iPhone simulator is installed")
+          print(phones[0]["udid"])
+          ')"
+          xcodebuild -project SophiasSightWords.xcodeproj -scheme SophiasSightWords \
+              -configuration Debug -destination "id=$device" \
+              -derivedDataPath "$RUNNER_TEMP/derived-data" \
+              "CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/sim-products" CODE_SIGNING_ALLOWED=NO build
+          xcrun simctl boot "$device"
+          xcrun simctl bootstatus "$device" -b
+          trap 'xcrun simctl shutdown "$device" || true' EXIT
+          xcrun simctl status_bar "$device" override --time "9:41" --dataNetwork wifi --wifiMode active --wifiBars 3
+          xcrun simctl install "$device" "$RUNNER_TEMP/sim-products/SophiasSightWords.app"
+          launch="$(xcrun simctl launch --terminate-running-process "$device" com.charbej.sophias.sightwords)"
+          echo "$launch"
+          pid="${launch##*: }"
+          sleep 5
+          xcrun simctl spawn "$device" launchctl list | awk -v pid="$pid" '$1 == pid {found=1;print} END {exit !found}'
+          xcrun simctl io "$device" screenshot "$RUNNER_TEMP/Sophia-iPhone.png"
+          echo "SOPHIA_SIMULATOR_LAUNCH_PASS"
+      - name: Encrypt build and diagnostics
+        if: always()
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then exit 0; fi
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
           import os
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          root = Path(os.environ["RUNNER_TEMP"])
-          cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
-          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log"):
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          for name in ['Sophia-iPhone.png', 'compile.log']:
               path = root / name
-              if path.exists():
+              if path.is_file():
                   nonce = os.urandom(12)
-                  (root / (name + ".aesgcm")).write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
           PY
-      - name: Upload encrypted IPA
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: encrypted-ipa
-          path: ${{ runner.temp }}/SophiasSightWords-unsigned.ipa.aesgcm
-          if-no-files-found: ignore
+          name: ${{ matrix.scheme }}-encrypted
+          path: ${{ runner.temp }}/*.aesgcm
           retention-days: 1
-      - name: Upload encrypted diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: encrypted-build-log
-          path: ${{ runner.temp }}/xcodebuild.log.aesgcm
           if-no-files-found: ignore
-          retention-days: 1
