@@ -1,4 +1,4 @@
-name: Sophia signed Apple upload
+name: Sophia SDK 27 signed build 15
 
 on: workflow_dispatch
 
@@ -10,7 +10,7 @@ jobs:
 
   release:
 
-    runs-on: macos-26
+    runs-on: xcode-27
 
     timeout-minutes: 35
 
@@ -34,6 +34,37 @@ jobs:
 
     steps:
 
+      - name: Select stable Xcode 27 and iPhoneOS SDK 27
+        shell: bash
+        run: |
+          set -euo pipefail
+          chosen=''
+          for app in /Applications/Xcode_27.2.app /Applications/Xcode_27.1.app; do
+            developer="$app/Contents/Developer"
+            [[ -x "$developer/usr/bin/xcodebuild" ]] || continue
+            if ! info="$(DEVELOPER_DIR="$developer" xcodebuild -version)"; then continue; fi
+            version="$(printf '%s\n' "$info" | awk '/^Xcode / {print $2}')"
+            build="$(printf '%s\n' "$info" | awk '/^Build version / {print $3}')"
+            if ! sdk="$(DEVELOPER_DIR="$developer" xcrun --sdk iphoneos --show-sdk-version)"; then continue; fi
+            case "$version|$build|$sdk" in
+              '27.2|27B52|27.2'|'27.1|27A9275|27.1') ;;
+              *) continue ;;
+            esac
+            chosen="$developer"
+            break
+          done
+          if [[ -z "$chosen" ]]; then
+            echo 'The runner has no allowlisted stable Xcode 27 / iPhoneOS 27 toolchain.' >&2
+            exit 1
+          fi
+          {
+            printf 'DEVELOPER_DIR=%s\n' "$chosen"
+            printf 'SOPHIA_RELEASE_XCODE_VERSION=%s\n' "$version"
+            printf 'SOPHIA_RELEASE_XCODE_BUILD=%s\n' "$build"
+            printf 'SOPHIA_RELEASE_IPHONE_SDK=%s\n' "$sdk"
+          } >> "$GITHUB_ENV"
+          printf 'Selected stable Xcode %s (%s) with iPhoneOS SDK %s.\n' "$version" "$build" "$sdk"
+
       - name: Prepare trusted build tools
 
         run: |
@@ -41,6 +72,7 @@ jobs:
           set -euo pipefail
 
           xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
 
           brew install xcodegen
 
@@ -102,9 +134,9 @@ jobs:
 
               return data
 
-          encrypted=download('apple-port/sophia-store-release/source.aesgcm')
+          encrypted=download('apple-port/sophia-store-sdk27-build15/source.aesgcm')
 
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-release-20261118')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-build15-20261119')
 
           root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
 
