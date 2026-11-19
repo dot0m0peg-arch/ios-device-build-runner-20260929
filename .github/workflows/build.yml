@@ -1,4 +1,4 @@
-name: Sophia SDK 27 signed build 15
+name: Sophia stable SDK 27.2 reward regression and signed build 16
 
 on: workflow_dispatch
 
@@ -9,10 +9,11 @@ permissions:
 jobs:
 
   release:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/sophia-reward16-20261119'
 
     runs-on: xcode-27
 
-    timeout-minutes: 35
+    timeout-minutes: 45
 
     strategy:
 
@@ -39,7 +40,7 @@ jobs:
         run: |
           set -euo pipefail
           chosen=''
-          for app in /Applications/Xcode_27.2.app /Applications/Xcode_27.1.app; do
+          for app in /Applications/Xcode_27.2.app; do
             developer="$app/Contents/Developer"
             [[ -x "$developer/usr/bin/xcodebuild" ]] || continue
             if ! info="$(DEVELOPER_DIR="$developer" xcodebuild -version)"; then continue; fi
@@ -47,7 +48,7 @@ jobs:
             build="$(printf '%s\n' "$info" | awk '/^Build version / {print $3}')"
             if ! sdk="$(DEVELOPER_DIR="$developer" xcrun --sdk iphoneos --show-sdk-version)"; then continue; fi
             case "$version|$build|$sdk" in
-              '27.2|27B52|27.2'|'27.1|27A9275|27.1') ;;
+              '27.2|27B52|27.2') ;;
               *) continue ;;
             esac
             chosen="$developer"
@@ -134,9 +135,9 @@ jobs:
 
               return data
 
-          encrypted=download('apple-port/sophia-store-sdk27-build15/source.aesgcm')
+          encrypted=download('apple-port/sophia-store-sdk27-reward16/source.aesgcm')
 
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-build15-20261119')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-reward16-20261119')
 
           root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
 
@@ -157,6 +158,9 @@ jobs:
           print(app+': source integrity verified.')
 
           PY
+
+      - name: Verify reward flow in Light and Dark appearance on a native iPhone simulator
+        run: python3 "$RUNNER_TEMP/apple-source/release/run_reward_regression.py"
 
       - name: Sign validate and upload release candidate
 
