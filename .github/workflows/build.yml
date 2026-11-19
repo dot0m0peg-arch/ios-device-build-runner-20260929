@@ -1,4 +1,4 @@
-name: Compare actual WebKit compositing on standard macOS 15
+name: Capture TIMBERSACK and Quicksilver on the proven standard macOS 15 compositor
 on: workflow_dispatch
 permissions:
   contents: read
@@ -12,6 +12,7 @@ jobs:
       matrix:
         include:
           - {app: Timbersack, scheme: Timbersack-Mac, bundle: com.charbej.timbersack, device: Mac, slot: Timbersack-Mac}
+          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, bundle: com.charbej.quicksilverpennies, device: Mac, slot: Quicksilver-Mac}
     env:
       APP_KEY: ${{ matrix.app }}
       SCHEME: ${{ matrix.scheme }}
@@ -26,7 +27,6 @@ jobs:
           set -euo pipefail
           exec >> "$RUNNER_TEMP/capture.log" 2>&1
           ls -d /Applications/Xcode*.app
-          printf '%s\n' 'Installed Xcode candidates checked above. This job uses Xcode 26.3.'
           test -d /Applications/Xcode_26.3.app/Contents/Developer
           echo "DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer" >> "$GITHUB_ENV"
           DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer xcodebuild -version
@@ -94,24 +94,6 @@ jobs:
           exec >> "$RUNNER_TEMP/capture.log" 2>&1
           root="$RUNNER_TEMP/capture-source"
           product="$root/build/$SCHEME/products/$APP_KEY.app"
-          if [[ "$APP_KEY" == LastCarUpright ]]; then
-            python3 - "$root/audit/screenshot-scenes.js" <<'PY'
-          from pathlib import Path
-          import sys
-          source = Path(sys.argv[1])
-          text = source.read_text()
-          old = """        await click('[data-a=h2h]');
-                  await click('[data-a=go]');
-                  await click('[data-a=go]');"""
-          old = old.replace("\n                  ", "\n        ")
-          new = """        await wait('native Head to Head engine', () => window.LCU?.api?.startH2H);
-                  window.LCU.api.startH2H('chalk', 'ruckus');"""
-          new = new.replace("\n                  ", "\n        ")
-          if text.count(old) != 1:
-              raise ValueError('Existing screenshot scene source mismatch.')
-          source.write_text(text.replace(old, new))
-          PY
-          fi
           python3 - "$root/audit/RuntimeScreenshots.swift" <<'PY'
           from pathlib import Path
           import sys
@@ -140,134 +122,6 @@ jobs:
               path.write_text(text.replace(old, new))
           PY
           python3 "$root/audit/capture-runner.py" prepare "$root" "$APP_KEY" "$SCHEME"
-          uname -m
-          sw_vers
-          system_profiler SPDisplaysDataType
-          cat > "$root/audit/native-gl-probe.js" <<'JS'
-          (() => {
-            const records = [], seen = new WeakSet(), warnings = [];
-            let frames = 0, control = null;
-            const next = () => { frames++; requestAnimationFrame(next); };
-            requestAnimationFrame(next);
-            for (const key of ['warn','error']) {
-              const original = console[key].bind(console);
-              console[key] = (...args) => {
-                if (warnings.length < 24) warnings.push([key, ...args.map(x => {
-                  try { return String(x).slice(0, 900); } catch { return '[unavailable]'; }
-                })]);
-                original(...args);
-              };
-            }
-            const pixels = (gl) => {
-              const w=gl.drawingBufferWidth,h=gl.drawingBufferHeight,rgba=new Uint8Array(4), found=new Set();
-              for (const x of [.22,.41,.60,.78]) for (const y of [.22,.41,.60,.78]) {
-                gl.readPixels(Math.round((w-1)*x),Math.round((h-1)*y),1,1,gl.RGBA,gl.UNSIGNED_BYTE,rgba);
-                found.add([...rgba].join(','));
-              }
-              return [...found];
-            };
-            const original = HTMLCanvasElement.prototype.getContext;
-            HTMLCanvasElement.prototype.getContext = function(...args) {
-              const gl = Reflect.apply(original,this,args);
-              if (!gl || !/^experimental-webgl$|^webgl2?$/.test(String(args[0])) || seen.has(gl) || this.id==='__appleNativeGLControl') return gl;
-              seen.add(gl);
-              const row = {canvas:this.id||this.className||'(unnamed)',type:args[0],getContext:true,draws:0,observations:[]};
-              records.push(row);
-              let waiting=false, last=-3000;
-              for (const name of ['drawArrays','drawElements','drawArraysInstanced','drawElementsInstanced']) {
-                const draw=gl[name]; if (typeof draw!=='function') continue;
-                gl[name]=function(...arguments_) {
-                  const result=Reflect.apply(draw,this,arguments_);
-                  row.draws++;
-                  if (!waiting&&performance.now()-last>=850) {
-                    waiting=true; last=performance.now();
-                    queueMicrotask(()=>{
-                      waiting=false;
-                      try {
-                        const ext=gl.getExtension('WEBGL_debug_renderer_info');
-                        const program=gl.getParameter(gl.CURRENT_PROGRAM);
-                        const shader=program ? (gl.getAttachedShaders(program)||[]).map(v=>({
-                          kind:gl.getShaderParameter(v,gl.SHADER_TYPE), compiled:gl.getShaderParameter(v,gl.COMPILE_STATUS),
-                          log:gl.getShaderInfoLog(v)?.slice(0,600)
-                        })) : [];
-                        const css=this.canvas.getBoundingClientRect();
-                        const lost=gl.isContextLost();
-                        row.latest={
-                          frames,draws:row.draws,lost,dimensions:[gl.drawingBufferWidth,gl.drawingBufferHeight],
-                          css:[css.width,css.height],visibility:document.visibilityState,focused:document.hasFocus(),
-                          renderer:ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
-                          attributes:gl.getContextAttributes(),defaultFramebuffer:gl.getParameter(gl.FRAMEBUFFER_BINDING)===null,
-                          linked:program ? gl.getProgramParameter(program,gl.LINK_STATUS):null,
-                          linkLog:program ? gl.getProgramInfoLog(program)?.slice(0,700):null,
-                          shader, colors:lost||!gl.drawingBufferWidth||!gl.drawingBufferHeight?[]:pixels(gl)
-                        };
-                        if (row.observations.length<5) row.observations.push(row.latest);
-                      } catch(e) { row.error=String(e); }
-                    });
-                  }
-                  return result;
-                };
-              }
-              return gl;
-            };
-            window.appleNativeGLControl = () => {
-              if (control) return control;
-              const canvas = document.createElement('canvas');
-              canvas.width=96;canvas.height=96;canvas.id='__appleNativeGLControl';
-              canvas.setAttribute('style','position:fixed;left:18px;top:100px;width:96px;height:96px;z-index:2147483647;pointer-events:none;');
-              document.body.appendChild(canvas);
-              const gl=canvas.getContext('webgl2',{alpha:false,antialias:false});
-              if (!gl) return control={context:false};
-              const shader=(kind,text)=>{
-                const s=gl.createShader(kind);gl.shaderSource(s,text);gl.compileShader(s);
-                return {s,compiled:gl.getShaderParameter(s,gl.COMPILE_STATUS),log:gl.getShaderInfoLog(s)};
-              };
-              const vert=shader(gl.VERTEX_SHADER,'#version 300 es\nvoid main(){float x[3]=float[3](-1.0,1.0,0.0);float y[3]=float[3](-1.0,-1.0,1.0);gl_Position=vec4(x[gl_VertexID],y[gl_VertexID],0.0,1.0);}');
-              const frag=shader(gl.FRAGMENT_SHADER,'#version 300 es\nprecision highp float;out vec4 pixel;void main(){pixel=vec4(1.0,0.08,0.8,1.0);}');
-              const p=gl.createProgram();gl.attachShader(p,vert.s);gl.attachShader(p,frag.s);gl.linkProgram(p);
-              const linked=gl.getProgramParameter(p,gl.LINK_STATUS);
-              control={context:true,vertexCompiled:vert.compiled,fragmentCompiled:frag.compiled,linked,
-                vertexLog:vert.log,fragmentLog:frag.log,linkLog:gl.getProgramInfoLog(p),
-                renderer:gl.getParameter(gl.RENDERER),attributes:gl.getContextAttributes()};
-              if (linked) {
-                const frame=()=>{
-                  gl.viewport(0,0,96,96);gl.clearColor(0.05,0.05,0.05,1);gl.clear(gl.COLOR_BUFFER_BIT);
-                  gl.useProgram(p);gl.drawArrays(gl.TRIANGLES,0,3);
-                  control.colors=pixels(gl);
-                  control.lost=gl.isContextLost();
-                  requestAnimationFrame(frame);
-                };
-                frame();
-              }
-              return control;
-            };
-            window.appleNativeGLLatest=()=>({frames,visibility:document.visibilityState,focused:document.hasFocus(),control,records,warnings});
-          })();
-          JS
-          python3 - "$root" <<'PY'
-          import base64
-          import sys
-          from pathlib import Path
-          root=Path(sys.argv[1])
-          session=root/'Sources/GameSession.swift'
-          source=session.read_text()
-          token='configuration.websiteDataStore = .default()'
-          encoded=base64.b64encode((root/'audit/native-gl-probe.js').read_bytes()).decode()
-          if source.count(token)!=1: raise ValueError('WKWebView test configuration anchor changed.')
-          source=source.replace(token, token+'\n        configuration.userContentController.addUserScript(WKUserScript(source: String(decoding: Data(base64Encoded: "'+encoded+'")!, as: UTF8.self), injectionTime: .atDocumentStart, forMainFrameOnly: true))')
-          session.write_text(source)
-          runtime=root/'Sources/RuntimeScreenshots.swift'
-          text=runtime.read_text().replace('import ScreenCaptureKit','import ScreenCaptureKit\nimport Metal\nimport CoreGraphics')
-          text=text.replace('let count = prior is NSNull ? (app == "MyPetSnake" ? 3 : 2) : 0','let count = prior is NSNull ? 1 : 0')
-          anchor='                try await screenshot(view, window: window, to: output)'
-          if text.count(anchor)!=1: raise ValueError('Native GPU test capture anchor changed.')
-          diagnostic = '''                report("APPLE_GPU_METAL default=\\(MTLCreateSystemDefaultDevice()?.name ?? "none") all=\\(MTLCopyAllDevices().map(\\.name))")
-                          _ = try await view.evaluateJavaScript("window.appleNativeGLControl()")
-                          try await Task.sleep(for: .milliseconds(1100))
-                          let probe = try await view.evaluateJavaScript("JSON.stringify(window.appleNativeGLLatest())") as? String ?? "null"
-                          report("APPLE_GL_FRAMEBUFFER " + probe)'''
-          runtime.write_text(text.replace(anchor, diagnostic.replace("\n                          ","\n                ")+'\n'+anchor))
-          PY
           bash "$root/build-unsigned.sh" "$SCHEME"
           if [[ "$SCHEME" == *-Mac ]]; then
             codesign --force --sign - --timestamp=none --entitlements "$root/Apps/$APP_KEY/Mac.entitlements" "$product"
@@ -349,7 +203,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.slot }}-webgl-diagnostic-encrypted
+          name: ${{ matrix.slot }}-native-captures-encrypted
           path: |
             ${{ runner.temp }}/capture.log.aesgcm
             ${{ runner.temp }}/screenshots-native.zip.aesgcm
