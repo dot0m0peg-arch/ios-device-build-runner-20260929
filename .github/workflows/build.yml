@@ -1,24 +1,18 @@
-name: Prepare and qualify one polished Mac App Store package
-on:
-  workflow_dispatch:
-    inputs:
-      title:
-        description: Frozen app source
-        type: choice
-        options: [LastCarUpright]
-        required: true
+name: Diagnose native Last Car media from its preserved SDK 27 signed package
+on: workflow_dispatch
 permissions:
   contents: read
+  actions: read
 env:
-  APP_KEY: ${{ inputs.title }}
+  APP_KEY: LastCarUpright
   PLATFORM: MAC_OS
 jobs:
-  build:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/lastcar-privacy-v2-20261119'
+  companion:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/lastcar-native-replay-20261119'
     runs-on: xcode-27
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
-      - name: Use stable Xcode 27.2 and Mac SDK 27.2
+      - name: Get exact diagnostics and stable Xcode 27.2 tools
         shell: bash
         run: |
           set -euo pipefail
@@ -27,39 +21,26 @@ jobs:
           [[ "$(xcodebuild -version)" == $'Xcode 27.2\nBuild version 27B52' ]]
           [[ "$(xcrun --sdk macosx --show-sdk-version)" == '27.2' ]]
           echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
-          printf 'Selected stable Xcode 27.2 (27B52), macOS SDK 27.2.\n'
-      - name: Get the exact isolated harness and pinned build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/polished-mac-kit"
-          cd "$RUNNER_TEMP/polished-mac-kit"
-          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-20261119/tools"
-          for name in verify_release.py artifacts.py sign_package.py prepare_qa.py run_native_qa.py capture-kit.zip tool-hashes.sha256; do
+          mkdir "$RUNNER_TEMP/lastcar-diagnostic-tools"
+          cd "$RUNNER_TEMP/lastcar-diagnostic-tools"
+          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/lastcar-native-replay/tools"
+          for name in verify_release.py artifacts.py prepare_qa.py lastcar_replay.py run_native_qa.py diagnostic-pins.json tool-hashes.sha256; do
             curl --fail --silent --show-error --retry 2 --max-time 80 "$url/$name" -o "$name"
           done
           shasum -a 256 -c tool-hashes.sha256
           command -v xcodegen >/dev/null || brew install xcodegen
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1
-      - name: Authenticate the reused encrypted base and approved exact source overlay
+      - name: Authenticate the unchanged encrypted source and build the diagnostic companion only
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" source
-      - name: Sign and verify the exact package and separately build the SDK-matched test companion
-        shell: bash
-        env:
-          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
-          APPLE_INSTALLER_P12: ${{ secrets.APPLE_INSTALLER_P12 }}
-          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/sign_package.py"
-      - name: Encrypt signed packages and diagnostics for this run
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/lastcar-diagnostic-tools/artifacts.py" source
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/lastcar-diagnostic-tools/lastcar_replay.py" build
+      - name: Encrypt the diagnostic companion only
         if: always()
         shell: bash
         env:
@@ -68,22 +49,21 @@ jobs:
           set -euo pipefail
           source="$RUNNER_TEMP/mac-job-products"
           if [[ ! -d "$source" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" encrypt "$source" "$RUNNER_TEMP/mac-encrypted-build" build
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/lastcar-diagnostic-tools/artifacts.py" encrypt "$source" "$RUNNER_TEMP/lastcar-encrypted-companion" build
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ inputs.title }}-sdk27-build-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-build/*.aesgcm
+          name: LastCarUpright-sdk27-native-replay-companion-encrypted
+          path: ${{ runner.temp }}/lastcar-encrypted-companion/*.aesgcm
           retention-days: 3
           if-no-files-found: ignore
-
-  qualify:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/lastcar-privacy-v2-20261119'
-    needs: build
+  diagnose:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/lastcar-native-replay-20261119'
+    needs: companion
     runs-on: macos-15
-    timeout-minutes: 22
+    timeout-minutes: 25
     steps:
-      - name: Get the exact isolated test harness and verify the GUI host
+      - name: Get exact diagnostic tools on the known native display runner
         shell: bash
         run: |
           set -euo pipefail
@@ -92,32 +72,43 @@ jobs:
           export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
           test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
           echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
-          mkdir "$RUNNER_TEMP/polished-mac-kit"
-          cd "$RUNNER_TEMP/polished-mac-kit"
-          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-20261119/tools"
-          for name in verify_release.py artifacts.py sign_package.py prepare_qa.py run_native_qa.py capture-kit.zip tool-hashes.sha256; do
+          mkdir "$RUNNER_TEMP/lastcar-diagnostic-tools"
+          cd "$RUNNER_TEMP/lastcar-diagnostic-tools"
+          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/lastcar-native-replay/tools"
+          for name in verify_release.py artifacts.py prepare_qa.py lastcar_replay.py run_native_qa.py diagnostic-pins.json tool-hashes.sha256; do
             curl --fail --silent --show-error --retry 2 --max-time 80 "$url/$name" -o "$name"
           done
           shasum -a 256 -c tool-hashes.sha256
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1 Pillow==12.2.0
+      - name: Download the original unchanged signed installer artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '14526314216'
+          run-id: '44519418398'
+          github-token: ${{ github.token }}
+          merge-multiple: 'true'
+          path: ${{ runner.temp }}/lastcar-encrypted-original
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: ${{ inputs.title }}-sdk27-build-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-build
-      - name: Authenticate and inspect actual signed package on the QA runner
+          name: LastCarUpright-sdk27-native-replay-companion-encrypted
+          path: ${{ runner.temp }}/lastcar-encrypted-companion
+      - name: Authenticate both exact artifacts and diagnose native playback
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" decrypt "$RUNNER_TEMP/mac-encrypted-build" "$RUNNER_TEMP/mac-job-products" build
-      - name: Verify native gameplay audio compositing and persistence
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/run_native_qa.py"
-      - name: Encrypt the native inspection and media
+          mkdir "$RUNNER_TEMP/lastcar-encrypted-original-selected"
+          for file in LastCarUpright.pkg.aesgcm source-and-package.json.aesgcm; do
+            mv "$RUNNER_TEMP/lastcar-encrypted-original/$file" "$RUNNER_TEMP/lastcar-encrypted-original-selected/$file"
+          done
+          py="$RUNNER_TEMP/cryptoenv/bin/python"
+          code="$RUNNER_TEMP/lastcar-diagnostic-tools"
+          GITHUB_RUN_ID=44519418398 "$py" "$code/artifacts.py" decrypt "$RUNNER_TEMP/lastcar-encrypted-original-selected" "$RUNNER_TEMP/original-package-products" build
+          "$py" "$code/artifacts.py" decrypt "$RUNNER_TEMP/lastcar-encrypted-companion" "$RUNNER_TEMP/diagnostic-companion-products" build
+          env -u IPA_KEY_HEX "$py" "$code/lastcar_replay.py" qualify
+      - name: Encrypt native diagnostics, screenshots and unresolved checks
         if: always()
         shell: bash
         env:
@@ -126,11 +117,11 @@ jobs:
           set -euo pipefail
           source="$RUNNER_TEMP/mac-qa-products"
           if [[ ! -d "$source" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" encrypt "$source" "$RUNNER_TEMP/mac-encrypted-qa" qa
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/lastcar-diagnostic-tools/artifacts.py" encrypt "$source" "$RUNNER_TEMP/lastcar-encrypted-diagnostics" qa
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ inputs.title }}-sdk27-native-qa-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-qa/*.aesgcm
+          name: LastCarUpright-sdk27-native-replay-evidence-encrypted
+          path: ${{ runner.temp }}/lastcar-encrypted-diagnostics/*.aesgcm
           retention-days: 3
           if-no-files-found: ignore
