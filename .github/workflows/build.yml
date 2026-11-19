@@ -1,100 +1,100 @@
-name: Sophia signed Apple upload
-on: workflow_dispatch
-permissions:
-  contents: read
-jobs:
-  release:
-    runs-on: macos-26
-    timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        include:
-          - {app: SophiasSightWords, platform: IOS}
-    env:
-      APP_KEY: ${{ matrix.app }}
-      PLATFORM: ${{ matrix.platform }}
-    steps:
-      - name: Prepare trusted build tools
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          brew install xcodegen
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
-      - name: Decrypt exact release inputs
-        env:
-          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          from io import BytesIO
-          from pathlib import Path
-          from zipfile import ZipFile
-          from urllib.request import Request,urlopen
-          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          import hashlib,json,os
-          app=os.environ['APP_KEY']
-          repo=os.environ['GITHUB_REPOSITORY']
-          sha=os.environ['GITHUB_SHA']
-          api='https://api.github.com/repos/'+repo+'/git/trees/'+sha+'?recursive=1'
-          req=Request(api,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
-          with urlopen(req,timeout=60) as response:tree=json.load(response)
-          assert not tree.get('truncated',False)
-          files={v['path']:v['sha'] for v in tree['tree'] if v['type']=='blob'}
-          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          def download(name):
-              with urlopen('https://raw.githubusercontent.com/'+repo+'/'+sha+'/'+name,timeout=180) as response:data=response.read()
-              expected=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\x00'+data).hexdigest()
-              assert expected==files[name],'Git object identity mismatch'
-              return data
-          encrypted=download('apple-port/sophia-store-release/source.aesgcm')
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-release-20261118')
-          root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
-          root.mkdir()
-          with ZipFile(BytesIO(patch)) as layer:
-              for name in layer.namelist():assert (root/name).resolve().is_relative_to(root.resolve())
-              layer.extractall(root)
-          expected=json.loads((root/'release/expected-source-hashes.json').read_text())
-          for name,digest in expected.items():
-              assert hashlib.file_digest((root/name).open('rb'),'sha256').hexdigest()==digest,'Sophia source integrity mismatch'
-          print(app+': source integrity verified.')
-          PY
-      - name: Sign validate and upload release candidate
-        env:
-          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
-          APPLE_INSTALLER_P12: ${{ secrets.APPLE_INSTALLER_P12 }}
-          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
-          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
-          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
-          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
-        run: python3 "$RUNNER_TEMP/apple-source/release/build_release.py"
-      - name: Encrypt packages and diagnostics
-        if: always()
-        env:
-          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-        run: |
-          set -euo pipefail
-          if [[ ! -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          from pathlib import Path
-          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          import os
-          root=Path(os.environ['RUNNER_TEMP'])
-          dest=root/'encrypted-release'
-          dest.mkdir(exist_ok=True)
-          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          for p in (root/'release-output').glob('*'):
-              if p.is_file():
-                  nonce=os.urandom(12)
-                  (dest/(p.name+'.aesgcm')).write_bytes(nonce+cipher.encrypt(nonce,p.read_bytes(),None))
-          PY
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: ${{ matrix.app }}-signed-release-encrypted
-          path: ${{ runner.temp }}/encrypted-release/*.aesgcm
-          retention-days: 3
-          if-no-files-found: ignore
+name: Sophia signed Apple upload
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - {app: SophiasSightWords, platform: IOS}
+    env:
+      APP_KEY: ${{ matrix.app }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Prepare trusted build tools
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
+      - name: Decrypt exact release inputs
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          from io import BytesIO
+          from pathlib import Path
+          from zipfile import ZipFile
+          from urllib.request import Request,urlopen
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          import hashlib,json,os
+          app=os.environ['APP_KEY']
+          repo=os.environ['GITHUB_REPOSITORY']
+          sha=os.environ['GITHUB_SHA']
+          api='https://api.github.com/repos/'+repo+'/git/trees/'+sha+'?recursive=1'
+          req=Request(api,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with urlopen(req,timeout=60) as response:tree=json.load(response)
+          assert not tree.get('truncated',False)
+          files={v['path']:v['sha'] for v in tree['tree'] if v['type']=='blob'}
+          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          def download(name):
+              with urlopen('https://raw.githubusercontent.com/'+repo+'/'+sha+'/'+name,timeout=180) as response:data=response.read()
+              expected=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\x00'+data).hexdigest()
+              assert expected==files[name],'Git object identity mismatch'
+              return data
+          encrypted=download('apple-port/sophia-store-release/source.aesgcm')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-release-20261118')
+          root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
+          root.mkdir()
+          with ZipFile(BytesIO(patch)) as layer:
+              for name in layer.namelist():assert (root/name).resolve().is_relative_to(root.resolve())
+              layer.extractall(root)
+          expected=json.loads((root/'release/expected-source-hashes.json').read_text())
+          for name,digest in expected.items():
+              assert hashlib.file_digest((root/name).open('rb'),'sha256').hexdigest()==digest,'Sophia source integrity mismatch'
+          print(app+': source integrity verified.')
+          PY
+      - name: Sign validate and upload release candidate
+        env:
+          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          APPLE_INSTALLER_P12: ${{ secrets.APPLE_INSTALLER_P12 }}
+          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
+          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
+          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
+        run: python3 "$RUNNER_TEMP/apple-source/release/build_release.py"
+      - name: Encrypt packages and diagnostics
+        if: always()
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then exit 0; fi
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          from pathlib import Path
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          import os
+          root=Path(os.environ['RUNNER_TEMP'])
+          dest=root/'encrypted-release'
+          dest.mkdir(exist_ok=True)
+          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          for p in (root/'release-output').glob('*'):
+              if p.is_file():
+                  nonce=os.urandom(12)
+                  (dest/(p.name+'.aesgcm')).write_bytes(nonce+cipher.encrypt(nonce,p.read_bytes(),None))
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ${{ matrix.app }}-signed-release-encrypted
+          path: ${{ runner.temp }}/encrypted-release/*.aesgcm
+          retention-days: 3
+          if-no-files-found: ignore
