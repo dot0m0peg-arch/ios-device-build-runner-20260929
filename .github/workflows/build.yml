@@ -1,82 +1,91 @@
-name: Apple game portfolio builds
-on:
-  workflow_dispatch:
+name: Signed Apple release uploads
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  build:
+  release:
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 2
       matrix:
         include:
-          - {app: MyPetSnake, scheme: MyPetSnake-Mac, save_app: true}
-          - {app: Timbersack, scheme: Timbersack-iOS, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-Mac, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-iOS, save_app: false}
-          - {app: Miner3D, scheme: Miner3D-Mac, save_app: true}
-          - {app: Miner3D, scheme: Miner3D-iOS, save_app: false}
-          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, save_app: true}
+          - {app: MyPetSnake, platform: IOS}
+          - {app: Timbersack, platform: MAC_OS}
+          - {app: LastCarUpright, platform: MAC_OS}
+          - {app: Miner3D, platform: MAC_OS}
+          - {app: QuicksilverPennies, platform: MAC_OS}
     env:
       APP_KEY: ${{ matrix.app }}
-      SCHEME: ${{ matrix.scheme }}
-      SAVE_APP: ${{ matrix.save_app }}
+      PLATFORM: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          sparse-checkout: apple-port/${{ matrix.app }}
-      - name: Prepare native build tools
+      - name: Prepare trusted build tools
         run: |
           set -euo pipefail
           xcodebuild -version
           brew install xcodegen
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
-      - name: Decrypt verified game payload
+      - name: Decrypt exact release inputs
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
+          from io import BytesIO
           from pathlib import Path
           from zipfile import ZipFile
+          from urllib.request import Request,urlopen
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-          segments = sorted((Path('apple-port') / os.environ['APP_KEY']).glob('*.aesgcm'))
-          if not segments:
-              raise ValueError('No encrypted source segments')
-          root = (Path(os.environ['RUNNER_TEMP']) / 'apple-source').resolve()
+          import hashlib,json,os
+          app=os.environ['APP_KEY']
+          repo=os.environ['GITHUB_REPOSITORY']
+          sha=os.environ['GITHUB_SHA']
+          api='https://api.github.com/repos/'+repo+'/git/trees/'+sha+'?recursive=1'
+          req=Request(api,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          with urlopen(req,timeout=60) as response:tree=json.load(response)
+          assert not tree.get('truncated',False)
+          files={v['path']:v['sha'] for v in tree['tree'] if v['type']=='blob'}
+          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          def download(name):
+              with urlopen('https://raw.githubusercontent.com/'+repo+'/'+sha+'/'+name,timeout=180) as response:data=response.read()
+              expected=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\x00'+data).hexdigest()
+              assert expected==files[name],'Git object identity mismatch'
+              return data
+          segments=sorted(p for p in files if p.startswith('apple-port/'+app+'/') and p.endswith('.aesgcm'))
+          assert segments,'No verified encrypted game segments'
+          root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
           root.mkdir()
-          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          archive = root.parent / 'source.zip'
-          with archive.open('wb') as output:
-              for index, path in enumerate(segments):
-                  if path.stem != f'{index:03d}':
-                      raise ValueError('Invalid segment index')
-                  data = path.read_bytes()
-                  context = f"{os.environ['APP_KEY']}:{index}".encode()
-                  output.write(cipher.decrypt(data[:12], data[12:], context))
-          with ZipFile(archive) as package:
-              for name in package.namelist():
-                  if not (root / name).resolve().is_relative_to(root):
-                      raise ValueError('Source entry is outside its directory')
-              package.extractall(root)
+          base=root.parent/'base.zip'
+          with base.open('wb') as output:
+              for index,name in enumerate(segments):
+                  assert Path(name).stem==f'{index:03d}'
+                  encrypted=download(name)
+                  output.write(cipher.decrypt(encrypted[:12],encrypted[12:],f'{app}:{index}'.encode()))
+          encrypted=download('apple-port/store-release/overlay.aesgcm')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'apple-store-release-20261118')
+          for layer in [ZipFile(base),ZipFile(BytesIO(patch))]:
+              with layer:
+                  for name in layer.namelist():assert (root/name).resolve().is_relative_to(root.resolve())
+                  layer.extractall(root)
+          expected=json.loads((root/'release/expected-game-hashes.json').read_text())[app]
+          game=root/'Apps'/app/'game'
+          actual={p.relative_to(game).as_posix():hashlib.file_digest(p.open('rb'),'sha256').hexdigest() for p in game.rglob('*') if p.is_file()}
+          assert expected and actual==expected,'Frozen game content did not match approved source'
+          print(app+': source integrity verified.')
           PY
-      - name: Compile and verify packaged game resources
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/apple-source"
-          product="$root/build/$SCHEME/products/$APP_KEY.app"
-          bash "$root/build-unsigned.sh" "$SCHEME" > "$RUNNER_TEMP/compile.log" 2>&1
-          if [[ "$SAVE_APP" == true ]]; then
-            ditto -c -k --keepParent "$product" "$RUNNER_TEMP/unsigned-app.zip"
-          fi
-          echo "Xcode compiled $SCHEME and verified the bundled payload."
-      - name: Encrypt build and diagnostics
+      - name: Sign validate and upload release candidate
+        env:
+          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          APPLE_INSTALLER_P12: ${{ secrets.APPLE_INSTALLER_P12 }}
+          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
+          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
+          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
+        run: python3 "$RUNNER_TEMP/apple-source/release/build_release.py"
+      - name: Encrypt packages and diagnostics
         if: always()
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -84,22 +93,22 @@ jobs:
           set -euo pipefail
           if [[ ! -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then exit 0; fi
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
           from pathlib import Path
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-          root = Path(os.environ['RUNNER_TEMP'])
-          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          for name in ['unsigned-app.zip', 'compile.log']:
-              path = root / name
-              if path.is_file():
-                  nonce = os.urandom(12)
-                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+          import os
+          root=Path(os.environ['RUNNER_TEMP'])
+          dest=root/'encrypted-release'
+          dest.mkdir(exist_ok=True)
+          cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          for p in (root/'release-output').glob('*'):
+              if p.is_file():
+                  nonce=os.urandom(12)
+                  (dest/(p.name+'.aesgcm')).write_bytes(nonce+cipher.encrypt(nonce,p.read_bytes(),None))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.scheme }}-encrypted
-          path: ${{ runner.temp }}/*.aesgcm
-          retention-days: 1
+          name: ${{ matrix.app }}-signed-release-encrypted
+          path: ${{ runner.temp }}/encrypted-release/*.aesgcm
+          retention-days: 3
           if-no-files-found: ignore
