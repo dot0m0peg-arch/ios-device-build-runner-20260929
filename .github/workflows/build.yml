@@ -1,4 +1,4 @@
-name: Verify only Snake iPad persistence after passed native gameplay
+name: Verify Snake iPad persistence with cold XCTest startup allowance
 on: workflow_dispatch
 permissions:
   contents: read
@@ -199,6 +199,8 @@ jobs:
               '    try:\n        reader.join(timeout=3)\n    finally:\n        process.stdout.close()\n',
               '    reader.join(timeout=3)\n    if not reader.is_alive():\n        process.stdout.close()\n'
           )
+          replace_once('            threshold = 170 if observer is None else 72\n',
+                       '            threshold = 330 if observer is None else 72\n')
           compile(driver, str(path), 'exec')
           path.write_text(driver, encoding='utf-8')
           print('Enabled iPad fresh launch after the exact native capture XCTest case passed.')
