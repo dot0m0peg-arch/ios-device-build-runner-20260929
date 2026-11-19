@@ -1,11 +1,11 @@
-name: Capture actual Snake starter tank and Dutch bunny with native launch diagnostics
+name: Verify responsive My Pet Snake build 18 on iPhone and iPad
 on: workflow_dispatch
 permissions:
   contents: read
 jobs:
   release:
     runs-on: macos-26
-    timeout-minutes: 14
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -15,9 +15,11 @@ jobs:
           - {app: MyPetSnake, scheme: MyPetSnake-iOS, bundle: com.mypetsnake.game, device: 'iPad Pro 13-inch (M5)', slot: Snake-iPad}
     env:
       APP_KEY: ${{ matrix.app }}
-      SCHEME: ${{ matrix.scheme }}
-      BUNDLE: ${{ matrix.bundle }}
       DEVICE: ${{ matrix.device }}
+      SLOT: ${{ matrix.slot }}
+      CANDIDATE_GAME_MANIFEST_SHA256: 7652e97fc920e8a86568af6398af22f6f71957193c7500f7635e542ebd987fd5
+      CANDIDATE_DELTA_SHA256: 11ee5d10656c095dee8e237eff47050e4c7091cdc4a6a20bae900565dcd95e49
+      CANDIDATE_SOURCE_SHA256: efa918dd1d881acac477bb21ea41705746bea933e8402b5b55d5741c6af04a27
       BASE_REF: e3e971e44dd6f468fb7b576ab98c3016ca71b8d3
     steps:
       - name: Prepare Xcode and fetch only required encrypted files
@@ -83,237 +85,39 @@ jobs:
                       actual[file.relative_to(root).as_posix()] = hashlib.file_digest(stream, 'sha256').hexdigest()
           if expect['files'] != actual:
               raise ValueError('Exactly packaged game files did not match the released payload.')
-          print(f'SHA-256 verified {len(actual)} game resources for {app}.')
+          print(f'SHA-256 verified {len(actual)} existing game resources for {app}.')
+          encrypted_delta = fetch(os.environ['GITHUB_SHA'], 'apple-port/final-capture-audit/snake-responsive-18.aesgcm')
+          update = cipher.decrypt(encrypted_delta[:12], encrypted_delta[12:], b'snake-responsive-build18-native')
+          if hashlib.sha256(update).hexdigest() != os.environ['CANDIDATE_DELTA_SHA256']:
+              raise ValueError('Encrypted candidate delta disagreed with its audited local SHA-256.')
+          with ZipFile(BytesIO(update)) as overlay:
+              candidate = json.loads(overlay.read('audit/payload-candidate.json'))
+              wanted = candidate['final_files']
+              replacements = {name for name in wanted if expect['files'].get(name) != wanted[name]}
+              actual_replacements = {name for name in overlay.namelist() if name.startswith('Apps/MyPetSnake/game/')}
+              if replacements != actual_replacements or replacements != set(candidate['changes']):
+                  raise ValueError('Responsive delta did not match exact approved code changes.')
+              if hashlib.sha256(overlay.read('project.json')).hexdigest() != candidate['candidate_project_sha256']:
+                  raise ValueError('Candidate project bytes are mismatched.')
+              checked_extract(overlay)
+          actual = {file.relative_to(root).as_posix(): hashlib.sha256(file.read_bytes()).hexdigest()
+                    for file in game.rglob('*') if file.is_file()}
+          manifest = hashlib.sha256(json.dumps(actual,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+          if actual != wanted or manifest != os.environ['CANDIDATE_GAME_MANIFEST_SHA256']:
+              raise ValueError('The composed responsive game source differs from signed-candidate source.')
+          if candidate['candidate_source_archive_sha256'] != os.environ['CANDIDATE_SOURCE_SHA256']:
+              raise ValueError('Responsive source ZIP provenance changed.')
+          settings = json.loads((root / 'project.json').read_bytes())['targets']['MyPetSnake-iOS']['settings']['base']
+          if (settings['MARKETING_VERSION'], settings['CURRENT_PROJECT_VERSION']) != ('1.16','18'):
+              raise ValueError('Expected exact candidate version 1.16 build 18.')
+          print(f'SHA-256 verified exact build 18 game files and native project. Game manifest {manifest}.')
+
           PY
-      - name: Capture actual gameplay and test native app relaunch
+      - name: Exercise real Snake gameplay through native XCTest
         run: |
           set -euo pipefail
           exec >> "$RUNNER_TEMP/capture.log" 2>&1
-          root="$RUNNER_TEMP/capture-source"
-          product="$root/build/$SCHEME/products/$APP_KEY.app"
-          if [[ "$APP_KEY" == LastCarUpright ]]; then
-            python3 - "$root/audit/screenshot-scenes.js" <<'PY'
-          from pathlib import Path
-          import sys
-          source = Path(sys.argv[1])
-          text = source.read_text()
-          old = """        await click('[data-a=h2h]');
-                  await click('[data-a=go]');
-                  await click('[data-a=go]');"""
-          old = old.replace("\n                  ", "\n        ")
-          new = """        await wait('native Head to Head engine', () => window.LCU?.api?.startH2H);
-                  window.LCU.api.startH2H('chalk', 'ruckus');"""
-          new = new.replace("\n                  ", "\n        ")
-          if text.count(old) != 1:
-              raise ValueError('Existing screenshot scene source mismatch.')
-          source.write_text(text.replace(old, new))
-          PY
-          fi
-          if [[ "$DEVICE" != Mac ]]; then
-            python3 - "$root/audit" <<'PY'
-          from pathlib import Path
-          import sys
-          directory = Path(sys.argv[1])
-          patches = [
-            ("RuntimeScreenshots.swift", "                report(\"APPLE_CAPTURE_FRAME \\(frame) \\(label)\")\n                try await Task.sleep(for: .seconds(5))", "                let acknowledgment = FileManager.default.temporaryDirectory\n                    .appendingPathComponent(\"screenshot-\\(frame)-\\(UUID().uuidString).ack\")\n                report(\"APPLE_CAPTURE_FRAME \\(frame) \\(label) \\(acknowledgment.path)\")\n                var captured = false\n                for _ in 0..<380 {\n                    if FileManager.default.fileExists(atPath: acknowledgment.path) {\n                        captured = true\n                        break\n                    }\n                    try await Task.sleep(for: .milliseconds(200))\n                }\n                guard captured else { throw CaptureFailure(\"Simulator did not acknowledge frame \\(frame)\") }\n                try? FileManager.default.removeItem(at: acknowledgment)"),
-            ("capture-runner.py", "                    _, frame, label = line.split()\n                    target = output / f\"{frame}-{label}.png\"\n                    run([\"xcrun\", \"simctl\", \"io\", device, \"screenshot\", str(target)], timeout=17)", "                    _, frame, label, acknowledgment_path = line.split(\" \", 3)\n                    target = output / f\"{frame}-{label}.png\"\n                    acknowledge = Path(acknowledgment_path).resolve()\n                    simulator_data = Path(run([\"xcrun\", \"simctl\", \"get_app_container\", device, bundle, \"data\"],\n                                             timeout=14, capture_output=True, text=True).stdout.strip()).resolve()\n                    if not acknowledge.is_relative_to(simulator_data):\n                        raise ValueError(\"Screenshot acknowledgment escaped the test app's simulator container\")\n                    shot = [\"xcrun\", \"simctl\", \"io\", device, \"screenshot\", str(target)]\n                    try:\n                        run(shot, timeout=45)\n                    except subprocess.TimeoutExpired:\n                        if not target.exists():\n                            raise\n                    from PIL import Image\n                    with Image.open(target) as picture:\n                        picture.verify()\n                    acknowledge.touch()"),
-          ]
-          patches.extend([
-            ("RuntimeScreenshots.swift", "        FileHandle.standardOutput.write(Data((message + \"\\n\").utf8))", "        let record = Data((message + \"\\n\").utf8)\n        #if os(iOS)\n        let log = URL(fileURLWithPath: NSHomeDirectory() + \"/tmp/apple-native-capture-progress.log\")\n        if let handle = try? FileHandle(forWritingTo: log) {\n            _ = try? handle.seekToEnd()\n            try? handle.write(contentsOf: record)\n            try? handle.close()\n        } else {\n            try? record.write(to: log, options: .atomic)\n        }\n        #endif\n        FileHandle.standardOutput.write(record)"),
-            ("capture-runner.py", "    if device:\n        with stdout.open(\"wb\") as out, stderr.open(\"wb\") as err:\n            child = subprocess.Popen([\"xcrun\", \"simctl\", \"launch\", \"--console-pty\",\n                \"--terminate-running-process\", device, bundle, *args], stdout=out, stderr=err)\n    else:", "    simulator_pid = None\n    if device:\n        container = Path(run([\"xcrun\", \"simctl\",\"get_app_container\",device,bundle,\"data\"],\n                             timeout=30, capture_output=True, text=True).stdout.strip()).resolve()\n        stdout = container / \"tmp\" / \"apple-native-capture-progress.log\"\n        stdout.unlink(missing_ok=True)\n        stderr.touch()\n        launched = subprocess.run([\"xcrun\", \"simctl\", \"launch\", \"--terminate-running-process\",\n                                   device, bundle, *args], timeout=80, capture_output=True, text=True)\n        print(f\"SIMCTL_LAUNCH_STATUS exit={launched.returncode} stdout={launched.stdout.strip()} stderr={launched.stderr.strip()}\", flush=True)\n        match = re.search(r\":\\s*(\\d+)\\s*$\", launched.stdout)\n        if launched.returncode or match is None:\n            raise RuntimeError(\"The simulator launch command did not establish an app PID\")\n        simulator_pid = int(match.group(1))\n        processes = run([\"xcrun\",\"simctl\",\"spawn\",device,\"launchctl\",\"list\"],\n                        timeout=22,capture_output=True,text=True).stdout\n        listing = [line for line in processes.splitlines() if line.split()[:1] == [str(simulator_pid)]]\n        print(f\"SIMCTL_LIVE_PROCESS pid={simulator_pid} matched={listing}\", flush=True)\n    else:"),
-            ("capture-runner.py", "            contents = stdout.read_text(errors=\"replace\")", "            contents = stdout.read_text(errors=\"replace\") if stdout.is_file() else \"\""),
-            ("capture-runner.py", "        raise TimeoutError(f\"{bundle} {mode} left no acceptance report; stderr: {stderr.read_text(errors='replace')[-1800:]}\")", "        if device and simulator_pid:\n            processes = run([\"xcrun\",\"simctl\",\"spawn\",device,\"launchctl\",\"list\"],\n                            timeout=18,capture_output=True,text=True).stdout\n            listing = [line for line in processes.splitlines() if line.split()[:1] == [str(simulator_pid)]]\n            print(f\"SIMCTL_LAST_PROCESS pid={simulator_pid} matched={listing}\", flush=True)\n            if mode == \"capture\":\n                diagnostic = root / \"launch-probe.png\"\n                subprocess.run([\"xcrun\",\"simctl\",\"io\",device,\"screenshot\",str(diagnostic)], timeout=28, check=False)\n        raise TimeoutError(f\"{bundle} {mode} left no app-container acceptance report; stderr: {stderr.read_text(errors='replace')[-1800:]}\")"),
-          ])
-          for name, before, after in patches:
-              path = directory / name
-              text = path.read_text()
-              if text.count(before) != 1:
-                  raise ValueError("Screenshot handshake baseline mismatch in " + name)
-              path.write_text(text.replace(before, after))
-          PY
-          fi
-          python3 - "$root/audit/capture-runner.py" <<'PY'
-          import sys
-          from pathlib import Path
-          source = Path(sys.argv[1])
-          text = source.read_text()
-          start = text.index("def boot_device(")
-          end = text.index("\n\ndef wait_process_exit", start)
-          text = text[:start] + "def boot_device(model, root):\n    return os.environ[\"APPLE_CAPTURE_SIMULATOR_DEVICE\"]\n" + text[end:]
-          start = text.index('        launched = subprocess.run(["xcrun", "simctl", "launch", "--terminate-running-process",')
-          end = text.index('\n        processes = run(', start)
-          repaired = "        launch_out = root / f\"{mode}-plain-launch.stdout\"\n        launch_err = root / f\"{mode}-plain-launch.stderr\"\n        with launch_out.open(\"wb\") as out, launch_err.open(\"wb\") as err:\n            launching = subprocess.Popen([\"xcrun\", \"simctl\", \"launch\", device, bundle, *args], stdout=out, stderr=err)\n            until = time.monotonic() + 90\n            while launching.poll() is None and not stdout.is_file() and time.monotonic() < until:\n                time.sleep(.25)\n        plain_stdout = launch_out.read_text(errors=\"replace\")\n        plain_stderr = launch_err.read_text(errors=\"replace\")\n        print(f\"SIMCTL_LAUNCH_STATUS exit={launching.poll()} stdout={plain_stdout.strip()} stderr={plain_stderr.strip()}\", flush=True)\n        match = re.search(r\":\\s*(\\d+)\\s*$\", plain_stdout)\n        if match:\n            simulator_pid = int(match.group(1))\n        else:\n            proven = stdout.read_text(errors=\"replace\") if stdout.is_file() else \"\"\n            app_pid = re.search(r\"APPLE_CAPTURE_PID (\\d+)\", proven)\n            if not app_pid:\n                if launching.poll() is None:\n                    launching.terminate()\n                raise RuntimeError(\"Plain simctl launch provided neither a returned PID nor app-container launch evidence\")\n            simulator_pid = int(app_pid.group(1))\n        if launching.poll() is None:\n            launching.terminate()\n        time.sleep(4)"
-          text = text[:start] + repaired + text[end:]
-          compile(text, str(source), "exec")
-          source.write_text(text)
-          PY
-          python3 - "$root/audit" <<'SCENE'
-          from pathlib import Path
-          import sys
-          root = Path(sys.argv[1])
-          file = root / "screenshot-scenes.js"
-          text = file.read_text()
-          start = text.index("    async MyPetSnake(frame)")
-          end = text.index("\n    async Timbersack", start)
-          file.write_text(text[:start] + "    async MyPetSnake(frame) {\n      await wait('first frame', () => window.sb?.ready && window.sb.breeding && !document.querySelector('#splash'));\n      if (frame === 1) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        if (!window.sb.room.enterTank('starter')) throw Error('Could not enter the actual starter tank');\n        await click('[data-pet-action=\"mode\"][data-pet-value=\"snake\"]');\n        const initialFrames = window.sb.stats.frames;\n        await wait('live Snake Care tank', () => window.sb.habitats.active &&\n          window.sb.habitats.state.mode === 'snake' && window.sb.body.group.visible &&\n          window.sb.stats.frames >= initialFrames + 4);\n        const oldMoisture = window.sb.habitats.state.moisture;\n        await click('[data-pet-action=\"mist\"]');\n        await wait('real terrarium mist', () => window.sb.habitats.visual.mist > 0 &&\n          window.sb.habitats.state.moisture > oldMoisture);\n        window.appleScreenshotSnakeCare = {\n          species: window.sb.current,\n          moisture: JSON.parse(localStorage.getItem('slime-buddy.habitats.v1')).pets[window.sb.current].moisture\n        };\n        return 'snake-care';\n      }\n      await click('[data-pet-action=\"mode\"][data-pet-value=\"bunny\"]');\n      await click('[data-pet-action=\"rabbit\"][data-pet-value=\"dutch\"]');\n      await wait('rendered Dutch bunny', () => {\n        const model = window.sb.scene.getObjectByName('Bunny');\n        return model?.visible && model.userData?.breed === 'dutch' && model.userData?.source === 'tripo';\n      });\n      return 'dutch-bunny';\n    }," + text[end:])
-          file = root / "capture-acceptance.js"
-          text = file.read_text()
-          start = text.index("    async MyPetSnake(prior)")
-          end = text.index("\n    async Timbersack", start)
-          file.write_text(text[:start] + "    async MyPetSnake(prior) {\n      await wait('running iOS game', () => window.sb?.ready && !document.querySelector('#splash'));\n      const saved = save('slime-buddy.habitats.v1');\n      require(saved?.mode === 'bunny' && saved.rabbit === 'dutch', 'No saved Dutch habitat');\n      const care = prior?.care || window.appleScreenshotSnakeCare;\n      require(care && Number.isFinite(care.moisture), 'Missing snake mist action evidence');\n      require(Math.abs(saved.pets[care.species].moisture - care.moisture) < 0.2,\n        'Saved snake mist moisture differed from the first run');\n      if (prior && window.sb.room.active) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        require(window.sb.room.enterTank('starter'), 'Could not reopen the actual starter tank');\n      }\n      await wait('Dutch Tripo model', () => {\n        const pet = window.sb.scene.getObjectByName('Bunny');\n        return window.sb.habitats.state.mode === 'bunny' && pet?.visible &&\n          pet.userData?.source === 'tripo' && pet.userData?.breed === 'dutch';\n      });\n      return {rabbit: saved.rabbit, care, frames: window.sb.stats.frames};\n    }," + text[end:])
-          file = root / "RuntimeScreenshots.swift"
-          text = file.read_text()
-          old = 'let count = prior is NSNull ? (app == "MyPetSnake" ? 3 : 2) : 0'
-          if text.count(old) != 1:
-              raise ValueError("Pinned Swift frame count did not match")
-          file.write_text(text.replace(old, "let count = prior is NSNull ? 2 : 0"))
-          file = root / "capture-runner.py"
-          text = file.read_text()
-          start = text.index('                    simulator_data = Path(run(["xcrun", "simctl", "get_app_container"')
-          end = text.index("                    if not acknowledge.is_relative_to(simulator_data)", start)
-          text = text[:start] + "                    simulator_data = container\n" + text[end:]
-          if '(2736,1260)' not in text or 'iPhone Air' not in text:
-              raise ValueError("Expected pinned simulator dimensions")
-          text = text.replace('{(2736,1260)} if model == "iPhone Air"', '{(2622,1206),(1206,2622)} if model == "iPhone 17 Pro"')
-          if '(2622,1206)' not in text or '"iPhone Air"' in text:
-              raise ValueError("The accepted medium iPhone dimensions did not replace the pinned Air values")
-          signature = "def launch(product, bundle, device, root, output, prior=None):"
-          text = text.replace(signature, "def launch(product, bundle, device, root, output, prior=None, simulator_data=None):")
-          start = text.index('        container = Path(run(["xcrun", "simctl","get_app_container",')
-          end = text.index('\n        stdout = container', start)
-          text = text[:start] + '        container = simulator_data\n' + text[end:]
-          old = """        if model != "Mac":
-                      device = boot_device(model, root)
-                      run(["xcrun", "simctl", "install", device, str(product)], timeout=70)
-                  original = launch(product, bundle, device, root, output)
-                  if device:
-                      subprocess.run(["xcrun", "simctl", "terminate", device, bundle], timeout=30, check=False, capture_output=True)
-                  result = launch(product, bundle, device, root, output, original)"""
-          new = """        container = None
-                  if model != "Mac":
-                      device = boot_device(model, root)
-                      run(["xcrun", "simctl", "install", device, str(product)], timeout=70)
-                      located = run(["xcrun", "simctl", "get_app_container", device, bundle, "data"],
-                                    timeout=30, capture_output=True, text=True)
-                      container = Path(located.stdout.strip()).resolve(strict=True)
-                      simulator = (Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices" / device).resolve()
-                      if not container.is_relative_to(simulator):
-                          raise ValueError("App container is outside the selected simulator")
-                  original = launch(product, bundle, device, root, output, simulator_data=container)
-                  result = launch(product, bundle, device, root, output, original, simulator_data=container)"""
-          if text.count(old) != 1: raise ValueError("Expected verified app install and relaunch harness")
-          text = text.replace(old,new)
-          old = "                    if not device:\n                        wait_process_exit(pid)"
-          if text.count(old) != 1: raise ValueError("Could not require actual first process exit")
-          text = text.replace(old, "                    if pid is None:\n                        raise RuntimeError('Missing native app PID for process-exit check')\n                    wait_process_exit(pid, maximum=20)")
-          diag = '''def report_simulator_stall(cause):
-              print(f"SIMULATOR_STALL {cause}", flush=True)
-              commands = [
-                  ["/usr/sbin/sysctl","-n","hw.memsize"],
-                  ["/usr/bin/vm_stat"],
-                  ["/bin/ps","-axo","pid,ppid,rss,%mem,comm"],
-                  ["/usr/bin/log","show","--last","3m","--style","compact","--predicate",
-                   'subsystem BEGINSWITH "com.apple.CoreSimulator" OR process == "CoreSimulatorService" OR eventMessage CONTAINS[c] "jetsam"'],
-              ]
-              for command in commands:
-                  try:
-                      result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=14)
-                      lines = result.stdout.splitlines()
-                      if command[0] == "/bin/ps":
-                          keywords = ("coresimulator", "simulator.app", "webkit", "mypetsnake", "springboard")
-                          lines = [line for line in lines if any(word in line.lower() for word in keywords)]
-                      print(f"SIMULATOR_STALL_HOST {command[0]} exit={result.returncode}", flush=True)
-                      print("\\n".join(lines[-80:]), flush=True)
-                  except (subprocess.SubprocessError, OSError) as exc:
-                      print(f"SIMULATOR_STALL_HOST {command[0]} failed: {exc}", flush=True)
-          
-          
-          '''
-          marker = "def invoke(product, app, bundle, model):"
-          if text.count(marker) != 1: raise ValueError("Missing simulator driver entry")
-          text = text.replace(marker, diag + marker)
-          old = "        error = str(exc)\n        print(error, flush=True)\n    finally:"
-          if text.count(old) != 1: raise ValueError("Missing controlled driver failure")
-          new = ("        error = str(exc)\n        print(error, flush=True)\n"
-                 "        if device and (isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) or 'neither a returned PID' in error):\n"
-                 "            report_simulator_stall(exc)\n    finally:")
-          text = text.replace(old,new)
-          if text.count('get_app_container') != 1:
-              raise ValueError("Simctl data lookup must happen only once across capture and relaunch")
-          compile(text, str(file), "exec")
-          file.write_text(text)
-          SCENE
-          python3 "$root/audit/capture-runner.py" prepare "$root" "$APP_KEY" "$SCHEME"
-          device="$(xcrun simctl list devices available -j | python3 -c '
-          import json, os, sys
-          runtime = json.load(sys.stdin)["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-5", [])
-          exact = [d["udid"] for d in runtime if d["name"] == os.environ["DEVICE"] and d.get("isAvailable")]
-          if not exact: raise SystemExit("No exact 26.5 simulator for " + os.environ["DEVICE"])
-          print(exact[0])
-          ')"
-          xcrun simctl boot "$device"
-          trap 'xcrun simctl shutdown "$device" || true' EXIT
-          xcrun simctl bootstatus "$device" -b
-          xcrun simctl status_bar "$device" override --time "9:41" --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState discharging --batteryLevel 100
-          export APPLE_CAPTURE_SIMULATOR_DEVICE="$device"
-          xcodegen generate --spec "$root/project.json" --project "$root"
-          xcodebuild -project "$root/CharbejAppleGames.xcodeproj" -scheme "$SCHEME" -configuration Debug \
-              -destination "id=$device" -derivedDataPath "$root/build/$SCHEME/derived-data" \
-              "CONFIGURATION_BUILD_DIR=$root/build/$SCHEME/products" CODE_SIGNING_ALLOWED=NO build
-          python3 "$root/verify-built.py" "$SCHEME" "$product"
-          if [[ "$SCHEME" == *-Mac ]]; then
-            codesign --force --sign - --timestamp=none --entitlements "$root/Apps/$APP_KEY/Mac.entitlements" "$product"
-            codesign --verify --strict "$product"
-          fi
-          if [[ "$DEVICE" == Mac ]]; then
-          cat > "$RUNNER_TEMP/set-capture-display.swift" <<'SWIFT'
-          import CoreGraphics
-          import Foundation
-          
-          let display = CGMainDisplayID()
-          let options = [kCGDisplayShowDuplicateLowResolutionModes as String: true] as CFDictionary
-          let modes = CGDisplayCopyAllDisplayModes(display, options) as? [CGDisplayMode] ?? []
-          
-          func scale(_ mode: CGDisplayMode) -> Double {
-              Double(mode.pixelWidth) / Double(max(1, mode.width))
-          }
-          func fits(_ mode: CGDisplayMode) -> Bool {
-              let factor = scale(mode)
-              return Double(mode.width) >= ceil(1440 / factor) + 20 &&
-                     Double(mode.height) >= ceil(900 / factor) + 100
-          }
-          func show(_ mode: CGDisplayMode) -> String {
-              "\(mode.width)x\(mode.height) logical at \(scale(mode))x (\(mode.pixelWidth)x\(mode.pixelHeight) pixels)"
-          }
-          if let active = CGDisplayCopyDisplayMode(display), fits(active) {
-              print("APPLE_CAPTURE_DISPLAY \(show(active)) existing mode")
-              exit(0)
-          }
-          
-          let choices = modes.filter(fits).sorted {
-              ($0.pixelWidth * $0.pixelHeight) < ($1.pixelWidth * $1.pixelHeight)
-          }
-          for mode in choices {
-              var transaction: CGDisplayConfigRef?
-              guard CGBeginDisplayConfiguration(&transaction) == .success else { continue }
-              if CGConfigureDisplayWithDisplayMode(transaction, display, mode, nil) != .success {
-                  CGCancelDisplayConfiguration(transaction)
-                  continue
-              }
-              if CGCompleteDisplayConfiguration(transaction, .forSession) == .success,
-                 let active = CGDisplayCopyDisplayMode(display), fits(active) {
-                  print("APPLE_CAPTURE_DISPLAY \(show(active)) selected for this runner session")
-                  exit(0)
-              }
-          }
-          print("No Mac runner display mode can fit a native 1440x900 game viewport.")
-          for mode in modes.prefix(20) { print("APPLE_DISPLAY_AVAILABLE \(show(mode))") }
-          exit(1)
-          SWIFT
-          /usr/bin/swift "$RUNNER_TEMP/set-capture-display.swift"
-          sleep 2
-          fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$root/audit/capture-runner.py" invoke "$product" "$APP_KEY" "$BUNDLE" "$DEVICE"
+          /bin/bash "$RUNNER_TEMP/capture-source/audit/snake-native-xcuitest/run.sh"
       - name: Encrypt App Store screenshots and diagnostic receipts
         if: always()
         env:
@@ -332,7 +136,7 @@ jobs:
           captures = root / 'captures'
           if captures.is_dir():
               shutil.make_archive(str(root/'screenshots-native'), 'zip', captures)
-          for name in ('capture.log', 'screenshots-native.zip', 'launch-probe.png'):
+          for name in ('capture.log', 'screenshots-native.zip'):
               if (root / name).exists():
                   nonce = os.urandom(12)
                   (root / (name+'.aesgcm')).write_bytes(nonce + cipher.encrypt(nonce, (root / name).read_bytes(), None))
@@ -340,10 +144,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.slot }}-native-captures-encrypted
+          name: ${{ matrix.slot }}-responsive-native-encrypted
           path: |
             ${{ runner.temp }}/capture.log.aesgcm
             ${{ runner.temp }}/screenshots-native.zip.aesgcm
-            ${{ runner.temp }}/launch-probe.png.aesgcm
           retention-days: 1
           if-no-files-found: ignore
