@@ -1,82 +1,103 @@
-name: Apple game portfolio builds
-on:
-  workflow_dispatch:
+name: Last Car file bridge acceptance
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  build:
+  verify:
     runs-on: macos-26
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        include:
-          - {app: MyPetSnake, scheme: MyPetSnake-Mac, save_app: true}
-          - {app: Timbersack, scheme: Timbersack-iOS, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-Mac, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-iOS, save_app: false}
-          - {app: Miner3D, scheme: Miner3D-Mac, save_app: true}
-          - {app: Miner3D, scheme: Miner3D-iOS, save_app: false}
-          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, save_app: true}
-    env:
-      APP_KEY: ${{ matrix.app }}
-      SCHEME: ${{ matrix.scheme }}
-      SAVE_APP: ${{ matrix.save_app }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-          sparse-checkout: apple-port/${{ matrix.app }}
-      - name: Prepare native build tools
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          brew install xcodegen
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
-      - name: Decrypt verified game payload
+          sparse-checkout: |
+            apple-port/LastCarUpright
+            apple-port/last-car-file-audit
+      - name: Prepare Xcode and decrypt verified inputs
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
+          exec >> "$RUNNER_TEMP/compile.log" 2>&1
+          xcodebuild -version
+          brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          from io import BytesIO
           import os
           from pathlib import Path
           from zipfile import ZipFile
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-          segments = sorted((Path('apple-port') / os.environ['APP_KEY']).glob('*.aesgcm'))
-          if not segments:
-              raise ValueError('No encrypted source segments')
-          root = (Path(os.environ['RUNNER_TEMP']) / 'apple-source').resolve()
-          root.mkdir()
+          root = Path(os.environ['RUNNER_TEMP']).resolve()
+          src = root / 'lastcar'
+          src.mkdir()
           cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          archive = root.parent / 'source.zip'
-          with archive.open('wb') as output:
-              for index, path in enumerate(segments):
-                  if path.stem != f'{index:03d}':
-                      raise ValueError('Invalid segment index')
-                  data = path.read_bytes()
-                  context = f"{os.environ['APP_KEY']}:{index}".encode()
-                  output.write(cipher.decrypt(data[:12], data[12:], context))
-          with ZipFile(archive) as package:
-              for name in package.namelist():
-                  if not (root / name).resolve().is_relative_to(root):
-                      raise ValueError('Source entry is outside its directory')
-              package.extractall(root)
+          segments = sorted(Path('apple-port/LastCarUpright').glob('*.aesgcm'))
+          if not segments:
+              raise ValueError('Saved encrypted base segments missing.')
+          base = root / 'lastcar-source.zip'
+          with base.open('wb') as combined:
+              for index, file in enumerate(segments):
+                  if file.stem != f'{index:03d}':
+                      raise ValueError('Wrong segment order.')
+                  encrypted = file.read_bytes()
+                  combined.write(cipher.decrypt(encrypted[:12], encrypted[12:], f'LastCarUpright:{index}'.encode()))
+          overlay = Path('apple-port/last-car-file-audit/overlay.aesgcm').read_bytes()
+          with ZipFile(base) as original, ZipFile(BytesIO(cipher.decrypt(overlay[:12], overlay[12:], b'lastcar-file-bridge'))) as patch:
+              for layer in (original, patch):
+                  for name in layer.namelist():
+                      if not (src / name).resolve().is_relative_to(src):
+                          raise ValueError('Archive entry escaped its directory.')
+                  layer.extractall(src)
           PY
-      - name: Compile and verify packaged game resources
+          python3 "$RUNNER_TEMP/lastcar/audit/bridge-audit.py" verify "$RUNNER_TEMP/lastcar"
+      - name: Compile uninstrumented Mac and iOS packages
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/apple-source"
-          product="$root/build/$SCHEME/products/$APP_KEY.app"
-          bash "$root/build-unsigned.sh" "$SCHEME" > "$RUNNER_TEMP/compile.log" 2>&1
-          if [[ "$SAVE_APP" == true ]]; then
-            ditto -c -k --keepParent "$product" "$RUNNER_TEMP/unsigned-app.zip"
-          fi
-          echo "Xcode compiled $SCHEME and verified the bundled payload."
-      - name: Encrypt build and diagnostics
+          exec >> "$RUNNER_TEMP/compile.log" 2>&1
+          src="$RUNNER_TEMP/lastcar"
+          bash "$src/build-unsigned.sh" LastCarUpright-Mac
+          product="$src/build/LastCarUpright-Mac/products/LastCarUpright.app"
+          ditto -c -k --keepParent "$product" "$RUNNER_TEMP/lastcar-mac-unsigned.zip"
+          cd "$RUNNER_TEMP"
+          shasum -a 256 lastcar-mac-unsigned.zip > native-candidate.sha256
+          echo LASTCAR_MAC_COMPILED
+          bash "$src/build-unsigned.sh" LastCarUpright-iOS
+          echo LASTCAR_IOS_COMPILED
+      - name: Exercise native WKDownload and file dialogs in sandboxed Mac probe
+        run: |
+          set -euo pipefail
+          exec >> "$RUNNER_TEMP/compile.log" 2>&1
+          src="$RUNNER_TEMP/lastcar"
+          product="$src/build/LastCarUpright-Mac/products/LastCarUpright.app"
+          python3 "$src/audit/bridge-audit.py" instrument "$src"
+          bash "$src/build-unsigned.sh" LastCarUpright-Mac
+          codesign --force --sign - --timestamp=none --entitlements "$src/Apps/LastCarUpright/Mac.entitlements" "$product"
+          codesign --verify --strict "$product"
+          codesign -d --entitlements - "$product"
+          python3 - "$product" <<'PY'
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+
+          root = Path(os.environ['RUNNER_TEMP'])
+          output = root / 'runtime-out.txt'
+          error = root / 'runtime-error.txt'
+          output.touch()
+          error.touch()
+          try:
+              process = subprocess.run(['/usr/bin/open', '-W', '-n', '--stdout', str(output),
+                                        '--stderr', str(error), sys.argv[1]], timeout=105)
+          finally:
+              report = output.read_text(errors='replace') + error.read_text(errors='replace')
+              print(report, flush=True)
+          if process.returncode or 'LASTCAR_FILE_ROUND_TRIP_PASS ' not in report:
+              raise SystemExit('Native file bridge acceptance did not pass.')
+          PY
+      - name: Encrypt diagnostics and uninstrumented binary
         if: always()
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -90,16 +111,26 @@ jobs:
 
           root = Path(os.environ['RUNNER_TEMP'])
           cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          for name in ['unsigned-app.zip', 'compile.log']:
-              path = root / name
-              if path.is_file():
+          for name in ('compile.log', 'native-candidate.sha256', 'lastcar-mac-unsigned.zip'):
+              source = root / name
+              if source.is_file():
                   nonce = os.urandom(12)
-                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, source.read_bytes(), None))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.scheme }}-encrypted
-          path: ${{ runner.temp }}/*.aesgcm
+          name: last-car-bridge-receipt-encrypted
+          path: |
+            ${{ runner.temp }}/compile.log.aesgcm
+            ${{ runner.temp }}/native-candidate.sha256.aesgcm
           retention-days: 1
           if-no-files-found: ignore
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: last-car-unsigned-release-encrypted
+          path: ${{ runner.temp }}/lastcar-mac-unsigned.zip.aesgcm
+          retention-days: 1
+          if-no-files-found: ignore
+
