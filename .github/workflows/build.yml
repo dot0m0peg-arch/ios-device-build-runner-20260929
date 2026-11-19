@@ -1,4 +1,4 @@
-name: Signed Apple release uploads
+name: Signed My Pet Snake responsive update
 on: workflow_dispatch
 permissions:
   contents: read
@@ -12,10 +12,6 @@ jobs:
       matrix:
         include:
           - {app: MyPetSnake, platform: IOS}
-          - {app: Timbersack, platform: MAC_OS}
-          - {app: LastCarUpright, platform: MAC_OS}
-          - {app: Miner3D, platform: MAC_OS}
-          - {app: QuicksilverPennies, platform: MAC_OS}
     env:
       APP_KEY: ${{ matrix.app }}
       PLATFORM: ${{ matrix.platform }}
