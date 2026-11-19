@@ -1,136 +1,95 @@
-name: Prepare and qualify one polished Mac App Store package
+name: Validate and upload one accepted original Mac package
 on:
   workflow_dispatch:
     inputs:
       title:
-        description: Frozen app source
+        description: Exact approved Mac package
         type: choice
         options: [LastCarUpright, Miner3D]
         required: true
+      package_sha256:
+        description: Hash of the independently verified, already signed installer
+        type: string
+        required: true
+      native_run:
+        description: Root-approved native qualification run
+        type: string
+        required: true
+      native_sha256:
+        description: SHA-256 of the reviewed passing native report
+        type: string
+        required: true
 permissions:
   contents: read
+  actions: read
 env:
   APP_KEY: ${{ inputs.title }}
-  PLATFORM: MAC_OS
+  APPROVED_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+  APPROVED_NATIVE_RUN: ${{ inputs.native_run }}
+  APPROVED_NATIVE_SHA256: ${{ inputs.native_sha256 }}
 jobs:
-  build:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/polished-mac-releases-20261119'
+  upload:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/polished-mac-package-upload-20261119'
     runs-on: xcode-27
-    timeout-minutes: 35
+    timeout-minutes: 33
     steps:
-      - name: Use stable Xcode 27.2 and Mac SDK 27.2
+      - name: Authenticate exact package-only upload script
         shell: bash
         run: |
           set -euo pipefail
           dev=/Applications/Xcode_27.2.app/Contents/Developer
           export DEVELOPER_DIR="$dev"
           [[ "$(xcodebuild -version)" == $'Xcode 27.2\nBuild version 27B52' ]]
-          [[ "$(xcrun --sdk macosx --show-sdk-version)" == '27.2' ]]
+          [[ "$(xcrun --sdk macosx --show-sdk-version)" == 27.2 ]]
           echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
-          printf 'Selected stable Xcode 27.2 (27B52), macOS SDK 27.2.\n'
-      - name: Get the exact isolated harness and pinned build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir "$RUNNER_TEMP/polished-mac-kit"
-          cd "$RUNNER_TEMP/polished-mac-kit"
-          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-20261119/tools"
-          for name in verify_release.py artifacts.py sign_package.py prepare_qa.py run_native_qa.py capture-kit.zip tool-hashes.sha256; do
-            curl --fail --silent --show-error --retry 2 --max-time 80 "$url/$name" -o "$name"
-          done
-          shasum -a 256 -c tool-hashes.sha256
-          command -v xcodegen >/dev/null || brew install xcodegen
+          cd "$RUNNER_TEMP"
+          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-package-upload/upload_exact_mac_pkg.py"
+          curl --fail --silent --show-error --retry 2 --max-time 90 "$url" -o upload_exact_mac_pkg.py
+          printf '%s  %s\n' 'ac966d892a209e2c26e1371d182d7a273fc17cf37b55dd1c952c2e3f6b20746e' 'upload_exact_mac_pkg.py' | shasum -a 256 -c
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1
-      - name: Authenticate the reused encrypted base and approved exact source overlay
+      - name: Download the original Last Car signed package
+        if: inputs.title == 'LastCarUpright'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '14526314216'
+          run-id: '44519418398'
+          github-token: ${{ github.token }}
+          merge-multiple: 'true'
+          path: ${{ runner.temp }}/signed-encrypted
+      - name: Download the original Miner signed package
+        if: inputs.title == 'Miner3D'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: '14525664866'
+          run-id: '44517353220'
+          github-token: ${{ github.token }}
+          merge-multiple: 'true'
+          path: ${{ runner.temp }}/signed-encrypted
+      - name: Verify, validate and upload only the unchanged signed package
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-          GH_TOKEN: ${{ github.token }}
+          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
+          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" source
-      - name: Sign and verify the exact package and separately build the SDK-matched test companion
-        shell: bash
-        env:
-          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
-          APPLE_INSTALLER_P12: ${{ secrets.APPLE_INSTALLER_P12 }}
-          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/sign_package.py"
-      - name: Encrypt signed packages and diagnostics for this run
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/upload_exact_mac_pkg.py" upload
+      - name: Encrypt validation and Apple upload receipts
         if: always()
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          source="$RUNNER_TEMP/mac-job-products"
-          if [[ ! -d "$source" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" encrypt "$source" "$RUNNER_TEMP/mac-encrypted-build" build
+          script="$RUNNER_TEMP/upload_exact_mac_pkg.py"
+          if [[ ! -d "$RUNNER_TEMP/apple-upload-report" ]]; then exit 0; fi
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$script" preserve
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ inputs.title }}-sdk27-build-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-build/*.aesgcm
-          retention-days: 3
-          if-no-files-found: ignore
-
-  qualify:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/polished-mac-releases-20261119'
-    needs: build
-    runs-on: macos-15
-    timeout-minutes: 22
-    steps:
-      - name: Get the exact isolated test harness and verify the GUI host
-        shell: bash
-        run: |
-          set -euo pipefail
-          sw_vers
-          [[ "$(sw_vers -productVersion)" == 15.* ]]
-          export DEVELOPER_DIR=/Applications/Xcode_26.3.app/Contents/Developer
-          test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
-          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
-          mkdir "$RUNNER_TEMP/polished-mac-kit"
-          cd "$RUNNER_TEMP/polished-mac-kit"
-          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-20261119/tools"
-          for name in verify_release.py artifacts.py sign_package.py prepare_qa.py run_native_qa.py capture-kit.zip tool-hashes.sha256; do
-            curl --fail --silent --show-error --retry 2 --max-time 80 "$url/$name" -o "$name"
-          done
-          shasum -a 256 -c tool-hashes.sha256
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1 Pillow==12.2.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: ${{ inputs.title }}-sdk27-build-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-build
-      - name: Authenticate and inspect actual signed package on the QA runner
-        shell: bash
-        env:
-          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" decrypt "$RUNNER_TEMP/mac-encrypted-build" "$RUNNER_TEMP/mac-job-products" build
-      - name: Verify native gameplay audio compositing and persistence
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/run_native_qa.py"
-      - name: Encrypt the native inspection and media
-        if: always()
-        shell: bash
-        env:
-          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-        run: |
-          set -euo pipefail
-          source="$RUNNER_TEMP/mac-qa-products"
-          if [[ ! -d "$source" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/polished-mac-kit/artifacts.py" encrypt "$source" "$RUNNER_TEMP/mac-encrypted-qa" qa
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: ${{ inputs.title }}-sdk27-native-qa-encrypted
-          path: ${{ runner.temp }}/mac-encrypted-qa/*.aesgcm
+          name: ${{ inputs.title }}-original-pkg-upload-receipt-encrypted
+          path: ${{ runner.temp }}/apple-upload-encrypted/*.aesgcm
           retention-days: 3
           if-no-files-found: ignore
