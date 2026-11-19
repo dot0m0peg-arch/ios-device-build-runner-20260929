@@ -1,4 +1,4 @@
-name: Verify responsive Snake with bounded native Simulator handshakes
+name: Verify responsive Snake with compile-correct native Simulator observer
 on: workflow_dispatch
 permissions:
   contents: read
@@ -123,6 +123,19 @@ jobs:
                   raise ValueError('Runner observer contains entries outside the test harness.')
               checked_extract(observers)
           print('Applied reviewed XCTest-only filesystem observer and bounded WebKit callbacks.')
+          shim = root / 'audit/snake-native-xcuitest/RuntimeScreenshots.swift'
+          source = shim.read_bytes()
+          before = b'let ready = try windowStatus(isRelaunch ? "restored" : "dutch-presented", from: [:], in: view)'
+          after = before.replace(b'let ready', b'let finalStatus', 1)
+          boundary = source.index(before)
+          if source.count(before) != 1:
+              raise ValueError('Exact test-only compile recovery location changed.')
+          tail = source[boundary:].replace(before, after, 1)
+          prior_write = b'try Data(ready.utf8).write(to: statusFile, options: .atomic)'
+          if tail.count(prior_write) != 1:
+              raise ValueError('Exact final native status write location changed.')
+          shim.write_bytes(source[:boundary] + tail.replace(prior_write, b'try Data(finalStatus.utf8).write(to: statusFile, options: .atomic)', 1))
+          print('Corrected the test-only Swift final status variable name.')
 
           PY
       - name: Capture responsive Snake and verify persistence through a new native process
