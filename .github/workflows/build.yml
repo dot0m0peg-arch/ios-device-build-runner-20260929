@@ -1,17 +1,30 @@
-name: Inspect and File native qualification
-on: workflow_dispatch
+name: Inspect and File private iPhone and iPad release
+on:
+  workflow_dispatch:
+    inputs:
+      delivery:
+        description: Create an encrypted signed device IPA, or also validate and upload it after approval
+        type: choice
+        required: true
+        default: archive
+        options:
+          - archive
+          - upload
 permissions:
   contents: read
+concurrency:
+  group: inspect-and-file-device-release
+  cancel-in-progress: false
 jobs:
-  inspect:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && startsWith(github.ref, 'refs/heads/codex/inspect-and-file-')
+  device:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && startsWith(github.ref, 'refs/heads/codex/inspect-file-device-')
     runs-on: xcode-27
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Verify SDK and open encrypted source
+      - name: Verify stable SDK and open exact device inputs
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -24,35 +37,45 @@ jobs:
           command -v xcodegen >/dev/null || brew install xcodegen
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1
-          cd apple-port/inspect-and-file
+          cd apple-port/inspect-file-device
           shasum -a 256 -c tool-hashes.sha256
-          "$RUNNER_TEMP/cryptoenv/bin/python" transport.py unpack source.aesgcm "$RUNNER_TEMP/inspect-source" --sha256 "$(cat source.sha256)"
-      - name: Compile and exercise native app
-        timeout-minutes: 26
+          "$RUNNER_TEMP/cryptoenv/bin/python" transport.py unpack device-input.aesgcm \
+            "$RUNNER_TEMP/inspect-device-source" --sha256 "$(cat device-input.sha256)"
+      - name: Sign and independently verify the native device IPA
         shell: bash
+        env:
+          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/inspect-products"
-          cd "$RUNNER_TEMP/inspect-source"
-          export INSPECT_OUTPUT_DIR="$RUNNER_TEMP/inspect-products"
-          export RUN_UI_TESTS=1
-          export KEEP_SIMULATOR_APP=1
-          bash scripts/check.sh > "$INSPECT_OUTPUT_DIR/check.log" 2>&1 || { tail -n 70 "$INSPECT_OUTPUT_DIR/check.log"; exit 1; }
-          tail -n 35 "$INSPECT_OUTPUT_DIR/check.log"
-      - name: Encrypt qualification results
+          python3 apple-port/inspect-file-device/build_device.py archive \
+            "$RUNNER_TEMP/inspect-device-source" "$RUNNER_TEMP/inspect-device-products"
+      - name: Validate and upload the exact approved signed device IPA
+        if: inputs.delivery == 'upload'
+        shell: bash
+        env:
+          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
+          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          python3 apple-port/inspect-file-device/build_device.py upload \
+            "$RUNNER_TEMP/inspect-device-source" "$RUNNER_TEMP/inspect-device-products"
+      - name: Encrypt the signed IPA and its verification receipt
         if: always()
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          if [[ -d "$RUNNER_TEMP/inspect-products" && -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then
-            "$RUNNER_TEMP/cryptoenv/bin/python" apple-port/inspect-and-file/transport.py pack "$RUNNER_TEMP/inspect-products" "$RUNNER_TEMP/inspect-encrypted/qualification.aesgcm"
+          if [[ -d "$RUNNER_TEMP/inspect-device-products" && -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then
+            "$RUNNER_TEMP/cryptoenv/bin/python" apple-port/inspect-file-device/transport.py pack \
+              "$RUNNER_TEMP/inspect-device-products" "$RUNNER_TEMP/inspect-device-encrypted/device-products.aesgcm"
           fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: inspect-and-file-native-encrypted
-          path: ${{ runner.temp }}/inspect-encrypted/*.aesgcm
+          name: inspect-and-file-device-encrypted
+          path: ${{ runner.temp }}/inspect-device-encrypted/device-products.aesgcm
           retention-days: 3
           if-no-files-found: ignore
