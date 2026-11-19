@@ -1,4 +1,4 @@
-name: Verify responsive My Pet Snake build 18 on iPhone and iPad
+name: Capture responsive Snake after settled tutorial readiness
 on: workflow_dispatch
 permissions:
   contents: read
@@ -111,11 +111,24 @@ jobs:
           if (settings['MARKETING_VERSION'], settings['CURRENT_PROJECT_VERSION']) != ('1.16','18'):
               raise ValueError('Expected exact candidate version 1.16 build 18.')
           print(f'SHA-256 verified exact build 18 game files and native project. Game manifest {manifest}.')
+          sealed_probe = fetch(os.environ['GITHUB_SHA'], 'apple-port/final-capture-audit/snake-responsive-18-xctest-observer.aesgcm')
+          probe = cipher.decrypt(sealed_probe[:12], sealed_probe[12:], b'snake-responsive-build18-observer')
+          if hashlib.sha256(probe).hexdigest() != '131d1aa6a49c09c41512ee558db7cac672ae439b32e0c2dcfe58526dd672676c':
+              raise ValueError('Test observer digest differs from the reviewed local archive.')
+          with ZipFile(BytesIO(probe)) as observers:
+              filenames = ('RuntimeScreenshots.swift', 'SnakeNativeUITests.swift', 'snake-native-probe.js',
+                           'prepare.py', 'run.sh', 'verify.py')
+              allowed = {'audit/snake-native-xcuitest/' + name for name in filenames}
+              if set(observers.namelist()) != allowed:
+                  raise ValueError('Runner observer contains entries outside the test harness.')
+              checked_extract(observers)
+          print('Applied reviewed XCTest-only observer including settled tutorial and genuine native taps.')
 
           PY
-      - name: Exercise real Snake gameplay through native XCTest
+      - name: Exercise settled Snake gameplay through real native XCTest taps
         run: |
           set -euo pipefail
+          exec 3>&1
           exec >> "$RUNNER_TEMP/capture.log" 2>&1
           /bin/bash "$RUNNER_TEMP/capture-source/audit/snake-native-xcuitest/run.sh"
       - name: Encrypt App Store screenshots and diagnostic receipts
