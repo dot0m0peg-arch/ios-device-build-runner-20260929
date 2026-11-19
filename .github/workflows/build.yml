@@ -1,4 +1,4 @@
-name: Capture real Snake Care and bunny gameplay on proven iOS 26.5 simulators
+name: Capture actual Snake starter tank and Dutch bunny with native launch diagnostics
 on: workflow_dispatch
 permissions:
   contents: read
@@ -155,12 +155,12 @@ jobs:
           text = file.read_text()
           start = text.index("    async MyPetSnake(frame)")
           end = text.index("\n    async Timbersack", start)
-          file.write_text(text[:start] + "    async MyPetSnake(frame) {\n      await wait('first frame', () => window.sb?.ready && window.sb.breeding && !document.querySelector('#splash'));\n      if (frame === 1) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        await click('[data-tank=\"starter\"]');\n        await click('[data-pet-action=\"mode\"][data-pet-value=\"snake\"]');\n        const initialFrames = window.sb.stats.frames;\n        await wait('live Snake Care tank', () => window.sb.habitats.active &&\n          window.sb.habitats.state.mode === 'snake' && window.sb.body.group.visible &&\n          window.sb.stats.frames >= initialFrames + 4);\n        const oldMoisture = window.sb.habitats.state.moisture;\n        await click('[data-pet-action=\"mist\"]');\n        await wait('real terrarium mist', () => window.sb.habitats.visual.mist > 0 &&\n          window.sb.habitats.state.moisture > oldMoisture);\n        window.appleScreenshotSnakeCare = {\n          species: window.sb.current,\n          moisture: JSON.parse(localStorage.getItem('slime-buddy.habitats.v1')).pets[window.sb.current].moisture\n        };\n        return 'snake-care';\n      }\n      await click('[data-pet-action=\"mode\"][data-pet-value=\"bunny\"]');\n      await click('[data-pet-action=\"rabbit\"][data-pet-value=\"dutch\"]');\n      await wait('rendered Dutch bunny', () => {\n        const model = window.sb.scene.getObjectByName('Bunny');\n        return model?.visible && model.userData?.breed === 'dutch' && model.userData?.source === 'tripo';\n      });\n      return 'dutch-bunny';\n    }," + text[end:])
+          file.write_text(text[:start] + "    async MyPetSnake(frame) {\n      await wait('first frame', () => window.sb?.ready && window.sb.breeding && !document.querySelector('#splash'));\n      if (frame === 1) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        if (!window.sb.room.enterTank('starter')) throw Error('Could not enter the actual starter tank');\n        await click('[data-pet-action=\"mode\"][data-pet-value=\"snake\"]');\n        const initialFrames = window.sb.stats.frames;\n        await wait('live Snake Care tank', () => window.sb.habitats.active &&\n          window.sb.habitats.state.mode === 'snake' && window.sb.body.group.visible &&\n          window.sb.stats.frames >= initialFrames + 4);\n        const oldMoisture = window.sb.habitats.state.moisture;\n        await click('[data-pet-action=\"mist\"]');\n        await wait('real terrarium mist', () => window.sb.habitats.visual.mist > 0 &&\n          window.sb.habitats.state.moisture > oldMoisture);\n        window.appleScreenshotSnakeCare = {\n          species: window.sb.current,\n          moisture: JSON.parse(localStorage.getItem('slime-buddy.habitats.v1')).pets[window.sb.current].moisture\n        };\n        return 'snake-care';\n      }\n      await click('[data-pet-action=\"mode\"][data-pet-value=\"bunny\"]');\n      await click('[data-pet-action=\"rabbit\"][data-pet-value=\"dutch\"]');\n      await wait('rendered Dutch bunny', () => {\n        const model = window.sb.scene.getObjectByName('Bunny');\n        return model?.visible && model.userData?.breed === 'dutch' && model.userData?.source === 'tripo';\n      });\n      return 'dutch-bunny';\n    }," + text[end:])
           file = root / "capture-acceptance.js"
           text = file.read_text()
           start = text.index("    async MyPetSnake(prior)")
           end = text.index("\n    async Timbersack", start)
-          file.write_text(text[:start] + "    async MyPetSnake(prior) {\n      await wait('running iOS game', () => window.sb?.ready && !document.querySelector('#splash'));\n      const saved = save('slime-buddy.habitats.v1');\n      require(saved?.mode === 'bunny' && saved.rabbit === 'dutch', 'No saved Dutch habitat');\n      const care = prior?.care || window.appleScreenshotSnakeCare;\n      require(care && Number.isFinite(care.moisture), 'Missing snake mist action evidence');\n      require(Math.abs(saved.pets[care.species].moisture - care.moisture) < 0.2,\n        'Saved snake mist moisture differed from the first run');\n      if (prior && window.sb.room.active) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        await click('[data-tank=\"starter\"]');\n      }\n      await wait('Dutch Tripo model', () => {\n        const pet = window.sb.scene.getObjectByName('Bunny');\n        return window.sb.habitats.state.mode === 'bunny' && pet?.visible &&\n          pet.userData?.source === 'tripo' && pet.userData?.breed === 'dutch';\n      });\n      return {rabbit: saved.rabbit, care, frames: window.sb.stats.frames};\n    }," + text[end:])
+          file.write_text(text[:start] + "    async MyPetSnake(prior) {\n      await wait('running iOS game', () => window.sb?.ready && !document.querySelector('#splash'));\n      const saved = save('slime-buddy.habitats.v1');\n      require(saved?.mode === 'bunny' && saved.rabbit === 'dutch', 'No saved Dutch habitat');\n      const care = prior?.care || window.appleScreenshotSnakeCare;\n      require(care && Number.isFinite(care.moisture), 'Missing snake mist action evidence');\n      require(Math.abs(saved.pets[care.species].moisture - care.moisture) < 0.2,\n        'Saved snake mist moisture differed from the first run');\n      if (prior && window.sb.room.active) {\n        if (localStorage.getItem('my-pet-snake.tutorial.v1') !== 'seen') await click('[data-st-skip]');\n        require(window.sb.room.enterTank('starter'), 'Could not reopen the actual starter tank');\n      }\n      await wait('Dutch Tripo model', () => {\n        const pet = window.sb.scene.getObjectByName('Bunny');\n        return window.sb.habitats.state.mode === 'bunny' && pet?.visible &&\n          pet.userData?.source === 'tripo' && pet.userData?.breed === 'dutch';\n      });\n      return {rabbit: saved.rabbit, care, frames: window.sb.stats.frames};\n    }," + text[end:])
           file = root / "RuntimeScreenshots.swift"
           text = file.read_text()
           old = 'let count = prior is NSNull ? (app == "MyPetSnake" ? 3 : 2) : 0'
@@ -177,6 +177,69 @@ jobs:
           text = text.replace('{(2736,1260)} if model == "iPhone Air"', '{(2622,1206),(1206,2622)} if model == "iPhone 17 Pro"')
           if '(2622,1206)' not in text or '"iPhone Air"' in text:
               raise ValueError("The accepted medium iPhone dimensions did not replace the pinned Air values")
+          signature = "def launch(product, bundle, device, root, output, prior=None):"
+          text = text.replace(signature, "def launch(product, bundle, device, root, output, prior=None, simulator_data=None):")
+          start = text.index('        container = Path(run(["xcrun", "simctl","get_app_container",')
+          end = text.index('\n        stdout = container', start)
+          text = text[:start] + '        container = simulator_data\n' + text[end:]
+          old = """        if model != "Mac":
+                      device = boot_device(model, root)
+                      run(["xcrun", "simctl", "install", device, str(product)], timeout=70)
+                  original = launch(product, bundle, device, root, output)
+                  if device:
+                      subprocess.run(["xcrun", "simctl", "terminate", device, bundle], timeout=30, check=False, capture_output=True)
+                  result = launch(product, bundle, device, root, output, original)"""
+          new = """        container = None
+                  if model != "Mac":
+                      device = boot_device(model, root)
+                      run(["xcrun", "simctl", "install", device, str(product)], timeout=70)
+                      located = run(["xcrun", "simctl", "get_app_container", device, bundle, "data"],
+                                    timeout=30, capture_output=True, text=True)
+                      container = Path(located.stdout.strip()).resolve(strict=True)
+                      simulator = (Path.home() / "Library" / "Developer" / "CoreSimulator" / "Devices" / device).resolve()
+                      if not container.is_relative_to(simulator):
+                          raise ValueError("App container is outside the selected simulator")
+                  original = launch(product, bundle, device, root, output, simulator_data=container)
+                  result = launch(product, bundle, device, root, output, original, simulator_data=container)"""
+          if text.count(old) != 1: raise ValueError("Expected verified app install and relaunch harness")
+          text = text.replace(old,new)
+          old = "                    if not device:\n                        wait_process_exit(pid)"
+          if text.count(old) != 1: raise ValueError("Could not require actual first process exit")
+          text = text.replace(old, "                    if pid is None:\n                        raise RuntimeError('Missing native app PID for process-exit check')\n                    wait_process_exit(pid, maximum=20)")
+          diag = '''def report_simulator_stall(cause):
+              print(f"SIMULATOR_STALL {cause}", flush=True)
+              commands = [
+                  ["/usr/sbin/sysctl","-n","hw.memsize"],
+                  ["/usr/bin/vm_stat"],
+                  ["/bin/ps","-axo","pid,ppid,rss,%mem,comm"],
+                  ["/usr/bin/log","show","--last","3m","--style","compact","--predicate",
+                   'subsystem BEGINSWITH "com.apple.CoreSimulator" OR process == "CoreSimulatorService" OR eventMessage CONTAINS[c] "jetsam"'],
+              ]
+              for command in commands:
+                  try:
+                      result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=14)
+                      lines = result.stdout.splitlines()
+                      if command[0] == "/bin/ps":
+                          keywords = ("coresimulator", "simulator.app", "webkit", "mypetsnake", "springboard")
+                          lines = [line for line in lines if any(word in line.lower() for word in keywords)]
+                      print(f"SIMULATOR_STALL_HOST {command[0]} exit={result.returncode}", flush=True)
+                      print("\\n".join(lines[-80:]), flush=True)
+                  except (subprocess.SubprocessError, OSError) as exc:
+                      print(f"SIMULATOR_STALL_HOST {command[0]} failed: {exc}", flush=True)
+          
+          
+          '''
+          marker = "def invoke(product, app, bundle, model):"
+          if text.count(marker) != 1: raise ValueError("Missing simulator driver entry")
+          text = text.replace(marker, diag + marker)
+          old = "        error = str(exc)\n        print(error, flush=True)\n    finally:"
+          if text.count(old) != 1: raise ValueError("Missing controlled driver failure")
+          new = ("        error = str(exc)\n        print(error, flush=True)\n"
+                 "        if device and (isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)) or 'neither a returned PID' in error):\n"
+                 "            report_simulator_stall(exc)\n    finally:")
+          text = text.replace(old,new)
+          if text.count('get_app_container') != 1:
+              raise ValueError("Simctl data lookup must happen only once across capture and relaunch")
           compile(text, str(file), "exec")
           file.write_text(text)
           SCENE
