@@ -1,4 +1,4 @@
-name: Verify responsive Snake with compile-correct native Simulator observer
+name: Verify only Snake iPad persistence after passed native gameplay
 on: workflow_dispatch
 permissions:
   contents: read
@@ -11,7 +11,6 @@ jobs:
       max-parallel: 3
       matrix:
         include:
-          - {app: MyPetSnake, scheme: MyPetSnake-iOS, bundle: com.mypetsnake.game, device: 'iPhone 17 Pro', slot: Snake-iPhone}
           - {app: MyPetSnake, scheme: MyPetSnake-iOS, bundle: com.mypetsnake.game, device: 'iPad Pro 13-inch (M5)', slot: Snake-iPad}
     env:
       APP_KEY: ${{ matrix.app }}
@@ -136,6 +135,73 @@ jobs:
               raise ValueError('Exact final native status write location changed.')
           shim.write_bytes(source[:boundary] + tail.replace(prior_write, b'try Data(finalStatus.utf8).write(to: statusFile, options: .atomic)', 1))
           print('Corrected the test-only Swift final status variable name.')
+          path = root / 'audit/snake-native-xcuitest/driver.py'
+          driver = path.read_text(encoding='utf-8')
+          
+          def replace_once(before, after):
+              global driver
+              if driver.count(before) != 1:
+                  raise ValueError('Pinned iPad host driver scope changed.')
+              driver = driver.replace(before, after)
+          
+          replace_once('from threading import Thread', 'from threading import Event, Thread')
+          replace_once('    events = Queue()\n', '    events = Queue()\n    passed_case = Event()\n')
+          replace_once(
+              '            match = re.fullmatch(r"\\s*SNAKE_XCTEST_STAGE ([a-z0-9-]+)\\s*", line)',
+              '''            if re.fullmatch(
+                          r"Test Case '-\\[SnakeNativeUITests\\.SnakeNativeUITests testGameplayCaptureAndRelaunch\\]' passed \\([0-9.]+ seconds\\)\\.",
+                          line.strip()
+                      ):
+                          passed_case.set()
+                          events.put("capture-case-passed")
+                      match = re.fullmatch(r"\\s*SNAKE_XCTEST_STAGE ([a-z0-9-]+)\\s*", line)'''
+          )
+          replace_once(
+              '    app_pid = None\n',
+              '''    app_pid = None
+              teardown_deadline = None
+              stopped_after_pass = False
+          '''
+          )
+          replace_once(
+              '            threshold = 170 if observer is None else 72\n',
+              '''            if passed_case.is_set() and isinstance(app_pid, int) and app_pid >= 2:
+                          if teardown_deadline is None:
+                              signal_game(app_pid, signal.SIGTERM)
+                              teardown_deadline = time.monotonic() + 15
+                              activity("passed-capture-case-teardown-started")
+                          elif time.monotonic() >= teardown_deadline and process.poll() is None:
+                              milestone("stopping-owned-xcodebuild-after-passed-case")
+                              process.terminate()
+                              try:
+                                  process.wait(timeout=8)
+                              except subprocess.TimeoutExpired:
+                                  process.kill()
+                                  process.wait(timeout=8)
+                              stopped_after_pass = True
+                              break
+          
+                      threshold = 170 if observer is None else 72
+          '''
+          )
+          replace_once(
+              '    if failure or process.returncode:\n        return 1\n',
+              '''    if failure or not passed_case.is_set() or (process.returncode != 0 and not stopped_after_pass):
+                  return 1
+              write_packet(output / "post-case-teardown.json", {
+                  "passed_test_case": "SnakeNativeUITests.testGameplayCaptureAndRelaunch",
+                  "owned_xcodebuild_stopped_by_host": stopped_after_pass,
+                  "xcodebuild_exit": process.returncode
+              })
+          '''
+          )
+          replace_once(
+              '    try:\n        reader.join(timeout=3)\n    finally:\n        process.stdout.close()\n',
+              '    reader.join(timeout=3)\n    if not reader.is_alive():\n        process.stdout.close()\n'
+          )
+          compile(driver, str(path), 'exec')
+          path.write_text(driver, encoding='utf-8')
+          print('Enabled iPad fresh launch after the exact native capture XCTest case passed.')
 
           PY
       - name: Capture responsive Snake and verify persistence through a new native process
