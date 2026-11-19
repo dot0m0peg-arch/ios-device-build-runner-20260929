@@ -1,82 +1,108 @@
-name: Apple game portfolio builds
-on:
-  workflow_dispatch:
+name: Final Store native screenshots and gameplay acceptance
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
-  build:
+  release:
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 14
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 3
       matrix:
         include:
-          - {app: MyPetSnake, scheme: MyPetSnake-Mac, save_app: true}
-          - {app: Timbersack, scheme: Timbersack-iOS, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-Mac, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-iOS, save_app: false}
-          - {app: Miner3D, scheme: Miner3D-Mac, save_app: true}
-          - {app: Miner3D, scheme: Miner3D-iOS, save_app: false}
-          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, save_app: true}
+          - {app: MyPetSnake, scheme: MyPetSnake-iOS, bundle: com.mypetsnake.game, device: 'iPhone Air', slot: Snake-iPhone}
+          - {app: MyPetSnake, scheme: MyPetSnake-iOS, bundle: com.mypetsnake.game, device: 'iPad Pro 13-inch (M5)', slot: Snake-iPad}
+          - {app: Timbersack, scheme: Timbersack-Mac, bundle: com.charbej.timbersack, device: Mac, slot: Timbersack-Mac}
+          - {app: LastCarUpright, scheme: LastCarUpright-Mac, bundle: com.connor.lastcarupright, device: Mac, slot: LastCar-Mac}
+          - {app: Miner3D, scheme: Miner3D-Mac, bundle: com.charbej.miner3d, device: Mac, slot: Miner-Mac}
+          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, bundle: com.charbej.quicksilverpennies, device: Mac, slot: Quicksilver-Mac}
     env:
       APP_KEY: ${{ matrix.app }}
       SCHEME: ${{ matrix.scheme }}
-      SAVE_APP: ${{ matrix.save_app }}
+      BUNDLE: ${{ matrix.bundle }}
+      DEVICE: ${{ matrix.device }}
+      BASE_REF: e3e971e44dd6f468fb7b576ab98c3016ca71b8d3
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          sparse-checkout: apple-port/${{ matrix.app }}
-      - name: Prepare native build tools
-        run: |
-          set -euo pipefail
-          xcodebuild -version
-          brew install xcodegen
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
-      - name: Decrypt verified game payload
+      - name: Prepare Xcode and fetch only required encrypted files
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
+          exec >> "$RUNNER_TEMP/capture.log" 2>&1
+          xcodebuild -version
+          brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1 'pillow>=12.2,<13'
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          import hashlib
+          from io import BytesIO
+          import json
           import os
           from pathlib import Path
+          import subprocess
           from zipfile import ZipFile
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          from concurrent.futures import ThreadPoolExecutor
 
-          segments = sorted((Path('apple-port') / os.environ['APP_KEY']).glob('*.aesgcm'))
-          if not segments:
-              raise ValueError('No encrypted source segments')
-          root = (Path(os.environ['RUNNER_TEMP']) / 'apple-source').resolve()
+          root = Path(os.environ['RUNNER_TEMP']).resolve() / 'capture-source'
           root.mkdir()
+          app = os.environ['APP_KEY']
+          remote = 'https://raw.githubusercontent.com/' + os.environ['GITHUB_REPOSITORY']
           cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          archive = root.parent / 'source.zip'
-          with archive.open('wb') as output:
-              for index, path in enumerate(segments):
-                  if path.stem != f'{index:03d}':
-                      raise ValueError('Invalid segment index')
-                  data = path.read_bytes()
-                  context = f"{os.environ['APP_KEY']}:{index}".encode()
-                  output.write(cipher.decrypt(data[:12], data[12:], context))
-          with ZipFile(archive) as package:
-              for name in package.namelist():
+
+          def fetch(ref, path):
+              return subprocess.run(['curl', '--fail', '--silent', '--show-error',
+                  '--retry', '2', '--max-time', '110', f'{remote}/{ref}/{path}'],
+                  check=True, capture_output=True, timeout=120).stdout
+
+          def checked_extract(archive):
+              for name in archive.namelist():
                   if not (root / name).resolve().is_relative_to(root):
-                      raise ValueError('Source entry is outside its directory')
-              package.extractall(root)
+                      raise ValueError('Archive entry escaped its directory.')
+              archive.extractall(root)
+
+          encrypted = fetch(os.environ['GITHUB_SHA'], 'apple-port/final-capture-audit/overlay.aesgcm')
+          patch = cipher.decrypt(encrypted[:12], encrypted[12:], b'final-capture-acceptance')
+          with ZipFile(BytesIO(patch)) as overlay:
+              expect = json.loads(overlay.read('audit/payload-index.json'))[app]
+
+              def segment(index):
+                  raw = fetch(os.environ['BASE_REF'], f'apple-port/{app}/{index:03d}.aesgcm')
+                  return cipher.decrypt(raw[:12], raw[12:], f'{app}:{index}'.encode())
+
+              base = root.parent / 'game-source.zip'
+              with base.open('wb') as output, ThreadPoolExecutor(max_workers=3) as pool:
+                  for plain in pool.map(segment, range(expect['segments'])):
+                      output.write(plain)
+              with ZipFile(base) as original:
+                  checked_extract(original)
+              checked_extract(overlay)
+
+          actual = {}
+          game = root / 'Apps' / app / 'game'
+          for file in game.rglob('*'):
+              if file.is_file():
+                  with file.open('rb') as stream:
+                      actual[file.relative_to(root).as_posix()] = hashlib.file_digest(stream, 'sha256').hexdigest()
+          if expect['files'] != actual:
+              raise ValueError('Exactly packaged game files did not match the released payload.')
+          print(f'SHA-256 verified {len(actual)} game resources for {app}.')
           PY
-      - name: Compile and verify packaged game resources
+      - name: Capture actual gameplay and test native app relaunch
         run: |
           set -euo pipefail
-          root="$RUNNER_TEMP/apple-source"
+          exec >> "$RUNNER_TEMP/capture.log" 2>&1
+          root="$RUNNER_TEMP/capture-source"
           product="$root/build/$SCHEME/products/$APP_KEY.app"
-          bash "$root/build-unsigned.sh" "$SCHEME" > "$RUNNER_TEMP/compile.log" 2>&1
-          if [[ "$SAVE_APP" == true ]]; then
-            ditto -c -k --keepParent "$product" "$RUNNER_TEMP/unsigned-app.zip"
+          python3 "$root/audit/capture-runner.py" prepare "$root" "$APP_KEY" "$SCHEME"
+          bash "$root/build-unsigned.sh" "$SCHEME"
+          if [[ "$SCHEME" == *-Mac ]]; then
+            codesign --force --sign - --timestamp=none --entitlements "$root/Apps/$APP_KEY/Mac.entitlements" "$product"
+            codesign --verify --strict "$product"
           fi
-          echo "Xcode compiled $SCHEME and verified the bundled payload."
-      - name: Encrypt build and diagnostics
+          "$RUNNER_TEMP/cryptoenv/bin/python" "$root/audit/capture-runner.py" invoke "$product" "$APP_KEY" "$BUNDLE" "$DEVICE"
+      - name: Encrypt App Store screenshots and diagnostic receipts
         if: always()
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -86,20 +112,26 @@ jobs:
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
           import os
           from pathlib import Path
+          import shutil
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
           root = Path(os.environ['RUNNER_TEMP'])
           cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          for name in ['unsigned-app.zip', 'compile.log']:
-              path = root / name
-              if path.is_file():
+          captures = root / 'captures'
+          if captures.is_dir():
+              shutil.make_archive(str(root/'screenshots-native'), 'zip', captures)
+          for name in ('capture.log', 'screenshots-native.zip'):
+              if (root / name).exists():
                   nonce = os.urandom(12)
-                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+                  (root / (name+'.aesgcm')).write_bytes(nonce + cipher.encrypt(nonce, (root / name).read_bytes(), None))
           PY
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.scheme }}-encrypted
-          path: ${{ runner.temp }}/*.aesgcm
+          name: ${{ matrix.slot }}-native-captures-encrypted
+          path: |
+            ${{ runner.temp }}/capture.log.aesgcm
+            ${{ runner.temp }}/screenshots-native.zip.aesgcm
           retention-days: 1
           if-no-files-found: ignore
+
