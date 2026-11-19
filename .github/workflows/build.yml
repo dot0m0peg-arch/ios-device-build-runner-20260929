@@ -1,86 +1,58 @@
-name: Validate and upload one accepted original Mac package
-on:
-  workflow_dispatch:
-    inputs:
-      title:
-        description: Exact approved Mac package
-        type: choice
-        options: [LastCarUpright]
-        required: true
-      package_sha256:
-        description: Hash of the independently verified, already signed installer
-        type: string
-        required: true
-      native_run:
-        description: Root-approved native qualification run
-        type: string
-        required: true
-      native_sha256:
-        description: SHA-256 of the reviewed passing native report
-        type: string
-        required: true
+name: Inspect and File native qualification
+on: workflow_dispatch
 permissions:
   contents: read
-  actions: read
-env:
-  APP_KEY: ${{ inputs.title }}
-  APPROVED_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
-  APPROVED_NATIVE_RUN: ${{ inputs.native_run }}
-  APPROVED_NATIVE_SHA256: ${{ inputs.native_sha256 }}
 jobs:
-  upload:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/lastcar-fullscreen-v3-upload-20261119'
+  inspect:
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && startsWith(github.ref, 'refs/heads/codex/inspect-and-file-')
     runs-on: xcode-27
-    timeout-minutes: 33
+    timeout-minutes: 30
     steps:
-      - name: Authenticate exact package-only upload script
-        shell: bash
-        run: |
-          set -euo pipefail
-          dev=/Applications/Xcode_27.2.app/Contents/Developer
-          export DEVELOPER_DIR="$dev"
-          [[ "$(xcodebuild -version)" == $'Xcode 27.2\nBuild version 27B52' ]]
-          [[ "$(xcrun --sdk macosx --show-sdk-version)" == 27.2 ]]
-          echo "DEVELOPER_DIR=$dev" >> "$GITHUB_ENV"
-          cd "$RUNNER_TEMP"
-          url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$GITHUB_SHA/apple-port/polished-mac-package-upload/upload_exact_mac_pkg.py"
-          curl --fail --silent --show-error --retry 2 --max-time 90 "$url" -o upload_exact_mac_pkg.py
-          printf '%s  %s\n' '717359cde4753fa87ad3d326f83a7e9541951457b5e3dbff809162e292d696ae' 'upload_exact_mac_pkg.py' | shasum -a 256 -c
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1
-      - name: Download the original Last Car signed package
-        if: inputs.title == 'LastCarUpright'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          artifact-ids: '14528228959'
-          run-id: '44524297483'
-          github-token: ${{ github.token }}
-          merge-multiple: 'true'
-          path: ${{ runner.temp }}/signed-encrypted
-      - name: Verify, validate and upload only the unchanged signed package
+          persist-credentials: false
+      - name: Verify SDK and open encrypted source
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
-          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
-          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
-          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$RUNNER_TEMP/upload_exact_mac_pkg.py" upload
-      - name: Encrypt validation and Apple upload receipts
+          export DEVELOPER_DIR=/Applications/Xcode_27.2.app/Contents/Developer
+          [[ "$(xcodebuild -version)" == $'Xcode 27.2\nBuild version 27B52' ]]
+          [[ "$(xcrun --sdk iphoneos --show-sdk-version)" == '27.2' ]]
+          echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
+          command -v xcodegen >/dev/null || brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet --retries 3 --timeout 20 cryptography==50.0.1
+          cd apple-port/inspect-and-file
+          shasum -a 256 -c tool-hashes.sha256
+          "$RUNNER_TEMP/cryptoenv/bin/python" transport.py unpack source.aesgcm "$RUNNER_TEMP/inspect-source" --sha256 "$(cat source.sha256)"
+      - name: Compile and exercise native app
+        timeout-minutes: 26
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/inspect-products"
+          cd "$RUNNER_TEMP/inspect-source"
+          export INSPECT_OUTPUT_DIR="$RUNNER_TEMP/inspect-products"
+          export RUN_UI_TESTS=1
+          export KEEP_SIMULATOR_APP=1
+          bash scripts/check.sh > "$INSPECT_OUTPUT_DIR/check.log" 2>&1 || { tail -n 70 "$INSPECT_OUTPUT_DIR/check.log"; exit 1; }
+          tail -n 35 "$INSPECT_OUTPUT_DIR/check.log"
+      - name: Encrypt qualification results
         if: always()
         shell: bash
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          script="$RUNNER_TEMP/upload_exact_mac_pkg.py"
-          if [[ ! -d "$RUNNER_TEMP/apple-upload-report" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" "$script" preserve
+          if [[ -d "$RUNNER_TEMP/inspect-products" && -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then
+            "$RUNNER_TEMP/cryptoenv/bin/python" apple-port/inspect-and-file/transport.py pack "$RUNNER_TEMP/inspect-products" "$RUNNER_TEMP/inspect-encrypted/qualification.aesgcm"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ inputs.title }}-original-pkg-upload-receipt-encrypted
-          path: ${{ runner.temp }}/apple-upload-encrypted/*.aesgcm
+          name: inspect-and-file-native-encrypted
+          path: ${{ runner.temp }}/inspect-encrypted/*.aesgcm
           retention-days: 3
           if-no-files-found: ignore
