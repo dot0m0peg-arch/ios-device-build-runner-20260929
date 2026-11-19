@@ -1,4 +1,4 @@
-name: Last Car file bridge acceptance
+name: Last Car file bridge acceptance recovery
 on: workflow_dispatch
 permissions:
   contents: read
@@ -7,12 +7,6 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          sparse-checkout: |
-            apple-port/LastCarUpright
-            apple-port/last-car-file-audit
       - name: Prepare Xcode and decrypt verified inputs
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -24,9 +18,11 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/cryptoenv"
           "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
           "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
+          from concurrent.futures import ThreadPoolExecutor
           from io import BytesIO
           import os
           from pathlib import Path
+          import subprocess
           from zipfile import ZipFile
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -34,17 +30,24 @@ jobs:
           src = root / 'lastcar'
           src.mkdir()
           cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          segments = sorted(Path('apple-port/LastCarUpright').glob('*.aesgcm'))
-          if not segments:
-              raise ValueError('Saved encrypted base segments missing.')
+          remote = 'https://raw.githubusercontent.com/' + os.environ['GITHUB_REPOSITORY']
+          payload_ref = 'e3e971e44dd6f468fb7b576ab98c3016ca71b8d3'
+          overlay_ref = '869a615b0528abe753c8212ca7dbb3f98ad40139'
+
+          def fetch(ref, path):
+              return subprocess.run(['curl', '--fail', '--silent', '--show-error',
+                  '--retry', '2', '--max-time', '100', f'{remote}/{ref}/{path}'],
+                  check=True, capture_output=True, timeout=115).stdout
+
+          def segment(index):
+              encrypted = fetch(payload_ref, f'apple-port/LastCarUpright/{index:03d}.aesgcm')
+              return cipher.decrypt(encrypted[:12], encrypted[12:], f'LastCarUpright:{index}'.encode())
+
           base = root / 'lastcar-source.zip'
-          with base.open('wb') as combined:
-              for index, file in enumerate(segments):
-                  if file.stem != f'{index:03d}':
-                      raise ValueError('Wrong segment order.')
-                  encrypted = file.read_bytes()
-                  combined.write(cipher.decrypt(encrypted[:12], encrypted[12:], f'LastCarUpright:{index}'.encode()))
-          overlay = Path('apple-port/last-car-file-audit/overlay.aesgcm').read_bytes()
+          with base.open('wb') as combined, ThreadPoolExecutor(max_workers=3) as pool:
+              for plain in pool.map(segment, range(7)):
+                  combined.write(plain)
+          overlay = fetch(overlay_ref, 'apple-port/last-car-file-audit/overlay.aesgcm')
           with ZipFile(base) as original, ZipFile(BytesIO(cipher.decrypt(overlay[:12], overlay[12:], b'lastcar-file-bridge'))) as patch:
               for layer in (original, patch):
                   for name in layer.namelist():
