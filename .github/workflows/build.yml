@@ -1,12 +1,12 @@
-name: Signed My Pet Snake build 19 with iPhoneOS SDK 27
+name: My Pet Snake build 20 compact phone layout with native QA
 on: workflow_dispatch
 permissions:
   contents: read
 jobs:
   release:
-    if: github.ref == 'refs/heads/codex/snake-sdk27-build19-20261119'
+    if: github.ref == 'refs/heads/codex/snake-phone-layout20-v2-20261119'
     runs-on: xcode-27
-    timeout-minutes: 35
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           chosen=''
-          for app in /Applications/Xcode_27.2.app /Applications/Xcode_27.1.app; do
+          for app in /Applications/Xcode_27.2.app; do
             developer="$app/Contents/Developer"
             [[ -x "$developer/usr/bin/xcodebuild" ]] || continue
             if ! info="$(DEVELOPER_DIR="$developer" xcodebuild -version)"; then continue; fi
@@ -30,7 +30,7 @@ jobs:
             build="$(printf '%s\n' "$info" | awk '/^Build version / {print $3}')"
             if ! sdk="$(DEVELOPER_DIR="$developer" xcrun --sdk iphoneos --show-sdk-version)"; then continue; fi
             case "$version|$build|$sdk" in
-              '27.2|27B52|27.2'|'27.1|27A9275|27.1') ;;
+              '27.2|27B52|27.2') ;;
               *) continue ;;
             esac
             chosen="$developer"
@@ -54,8 +54,9 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           brew install xcodegen
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
+          if ! command -v python3.12 >/dev/null; then brew install python@3.12; fi
+          python3.12 -m venv "$RUNNER_TEMP/cryptoenv"
+          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1 Pillow==11.3.0
       - name: Decrypt exact release inputs
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
@@ -93,8 +94,8 @@ jobs:
                   assert Path(name).stem==f'{index:03d}'
                   encrypted=download(name)
                   output.write(cipher.decrypt(encrypted[:12],encrypted[12:],f'{app}:{index}'.encode()))
-          encrypted=download('apple-port/store-release/snake-sdk27-build19-overlay.aesgcm')
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'snake-store-sdk27-build19-20261119')
+          encrypted=download('apple-port/store-release/snake-phone20-v2-overlay.aesgcm')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'snake-phone-layout20-v2-20261119')
           for layer in [ZipFile(base),ZipFile(BytesIO(patch))]:
               with layer:
                   for name in layer.namelist():assert (root/name).resolve().is_relative_to(root.resolve())
@@ -103,17 +104,35 @@ jobs:
           game=root/'Apps'/app/'game'
           actual={p.relative_to(game).as_posix():hashlib.file_digest(p.open('rb'),'sha256').hexdigest() for p in game.rglob('*') if p.is_file()}
           assert expected and actual==expected,'Frozen game content did not match approved source'
-          candidate=json.loads((root/'release/snake-sdk27-candidate.json').read_bytes())
+          candidate=json.loads((root/'release/snake-phone20-candidate.json').read_bytes())
           native_manifest={'Apps/'+app+'/game/'+name: value for name,value in actual.items()}
           manifest=hashlib.sha256(json.dumps(native_manifest,sort_keys=True,separators=(',',':')).encode()).hexdigest()
-          assert len(actual)==122 and manifest==candidate['game_manifest_sha256']
+          assert len(actual)==candidate['game_file_count'] and manifest==candidate['game_manifest_sha256']
           settings=json.loads((root/'project.json').read_bytes())['targets']['MyPetSnake-iOS']['settings']['base']
-          assert (settings['PRODUCT_BUNDLE_IDENTIFIER'],settings['MARKETING_VERSION'],settings['CURRENT_PROJECT_VERSION']) == ('com.mypetsnake.game','1.16','19')
+          assert (settings['PRODUCT_BUNDLE_IDENTIFIER'],settings['MARKETING_VERSION'],settings['CURRENT_PROJECT_VERSION']) == ('com.mypetsnake.game','1.16','20')
           for name,expected_hash in candidate['unchanged_native_and_ios_icon_files'].items():
               with (root/name).open('rb') as f:
                   assert hashlib.file_digest(f,'sha256').hexdigest()==expected_hash
-          print(app+': build 19, frozen gameplay, native Swift and iOS icons verified.')
+          print(app+': build 20, reviewed gameplay, native Swift and iOS icons verified.')
           PY
+      - name: Verify native compact phone and iPad gameplay before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/release-output"
+          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY' >"$RUNNER_TEMP/release-output/native-gate.log" 2>&1
+          from pathlib import Path
+          import os,json,shutil,subprocess
+          root=Path(os.environ['RUNNER_TEMP'])
+          src=root/'apple-source'
+          qa=root/'capture-source'
+          shutil.copytree(src,qa)
+          candidate=json.loads((src/'release/snake-phone20-candidate.json').read_bytes())
+          env=dict(os.environ,CANDIDATE_GAME_MANIFEST_SHA256=candidate['game_manifest_sha256'],SNAKE_QA_PYTHON=str(root/'cryptoenv/bin/python'))
+          subprocess.run(['bash',str(qa/'release/native-qa/run.sh'),str(qa),str(root/'native-qa-output')],env=env,check=True,timeout=1900)
+          subprocess.run([str(root/'cryptoenv/bin/python'),str(src/'release/verify-native-acceptance.py'),str(root/'native-qa-output'),str(src/'release/snake-phone20-candidate.json')],check=True,timeout=60)
+          PY
+          echo 'Exact candidate passed native phone and iPad layout/gameplay gates.'
       - name: Sign validate and upload release candidate
         env:
           APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
@@ -138,6 +157,10 @@ jobs:
           dest=root/'encrypted-release'
           dest.mkdir(exist_ok=True)
           cipher=AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
+          import shutil
+          if (root/'native-qa-output').is_dir():
+              (root/'release-output').mkdir(exist_ok=True)
+              shutil.make_archive(str(root/'release-output/native-qa'), 'zip', root/'native-qa-output')
           for p in (root/'release-output').glob('*'):
               if p.is_file():
                   nonce=os.urandom(12)
@@ -146,7 +169,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.app }}-build19-sdk27-encrypted
+          name: ${{ matrix.app }}-build20-phone-layout-v2-encrypted
           path: ${{ runner.temp }}/encrypted-release/*.aesgcm
           retention-days: 3
           if-no-files-found: ignore
