@@ -1,4 +1,4 @@
-name: Sophia stable SDK 27.2 reward regression and signed build 16 (harness v2)
+name: Sophia stable SDK 27.2 metadata rebuild 2.2.2 build 17
 
 on: workflow_dispatch
 
@@ -9,7 +9,7 @@ permissions:
 jobs:
 
   release:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/sophia-reward16-v2-20261119'
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/sophia-aso-build17-20261125'
 
     runs-on: xcode-27
 
@@ -135,9 +135,9 @@ jobs:
 
               return data
 
-          encrypted=download('apple-port/sophia-store-sdk27-reward16-v2/source.aesgcm')
+          encrypted=download('apple-port/sophia-store-sdk27-aso-build17/source.aesgcm')
 
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-reward16-v2-20261119')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-aso-build17-20261125')
 
           root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
 
