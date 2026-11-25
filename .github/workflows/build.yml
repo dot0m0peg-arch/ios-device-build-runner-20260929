@@ -1,4 +1,4 @@
-name: Sophia stable SDK 27.2 reward regression and signed build 16 (harness v2)
+name: Sophia iOS 2.2.2 build 17 audio release
 
 on: workflow_dispatch
 
@@ -9,7 +9,7 @@ permissions:
 jobs:
 
   release:
-    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/sophia-reward16-v2-20261119'
+    if: github.repository == 'dot0m0peg-arch/ios-device-build-runner-20260929' && github.ref == 'refs/heads/codex/sophia-audio-build17-20261125'
 
     runs-on: xcode-27
 
@@ -135,9 +135,9 @@ jobs:
 
               return data
 
-          encrypted=download('apple-port/sophia-store-sdk27-reward16-v2/source.aesgcm')
+          encrypted=download('apple-port/sophia-store-sdk27-audio-build17/source.aesgcm')
 
-          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-reward16-v2-20261119')
+          patch=cipher.decrypt(encrypted[:12],encrypted[12:],b'sophia-store-sdk27-audio-build17-20261125')
 
           root=Path(os.environ['RUNNER_TEMP'])/'apple-source'
 
@@ -150,6 +150,9 @@ jobs:
               layer.extractall(root)
 
           expected=json.loads((root/'release/expected-source-hashes.json').read_text())
+          actual={p.relative_to(root).as_posix() for p in root.rglob('*')
+                  if p.is_file() and p.relative_to(root).parts[0]!='release'}
+          assert set(expected)==actual,'Sophia source member set mismatch'
 
           for name,digest in expected.items():
 
@@ -159,7 +162,16 @@ jobs:
 
           PY
 
-      - name: Verify reward flow in Light and Dark appearance on a native iPhone simulator
+      - name: Qualify exact audio source with SwiftPM and app-hosted XCTest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python="$RUNNER_TOOL_CACHE/Python/3.12.10/arm64/bin/python3"
+          test -x "$python"
+          test "$("$python" --version)" = 'Python 3.12.10'
+          "$python" "$RUNNER_TEMP/apple-source/release/run_audio_preflight.py"
+
+      - name: Verify Light and Dark reward flow and the parent audio request on iPhone
         shell: bash
         run: |
           set -euo pipefail
@@ -184,7 +196,8 @@ jobs:
 
           APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
 
-        run: python3 "$RUNNER_TEMP/apple-source/release/build_release.py"
+        run: |
+          "$RUNNER_TOOL_CACHE/Python/3.12.10/arm64/bin/python3" "$RUNNER_TEMP/apple-source/release/build_release.py"
 
       - name: Encrypt packages and diagnostics
 
@@ -239,4 +252,3 @@ jobs:
           retention-days: 3
 
           if-no-files-found: ignore
-
