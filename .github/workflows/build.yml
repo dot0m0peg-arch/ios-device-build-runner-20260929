@@ -1,105 +1,108 @@
-name: Apple game portfolio builds
+# P8 runner on the existing Apple build repository. Codex (worker for Command).
+name: P8 iPhone archives and simulator evidence
 on:
   workflow_dispatch:
+    inputs:
+      games:
+        type: choice
+        required: false
+        default: 'lastcar,miner'
+        options:
+          - 'lastcar,miner'
+          - lastcar
+          - miner
+        description: Games in the staged overlay
+      owner_word:
+        type: string
+        required: false
+        default: ''
+        description: Message ID for an explicitly authorized App Store build upload
 permissions:
   contents: read
 jobs:
-  build:
+  iphone:
     runs-on: macos-26
-    timeout-minutes: 20
+    timeout-minutes: 75
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 1
       matrix:
-        include:
-          - {app: MyPetSnake, scheme: MyPetSnake-Mac, save_app: true}
-          - {app: Timbersack, scheme: Timbersack-iOS, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-Mac, save_app: true}
-          - {app: LastCarUpright, scheme: LastCarUpright-iOS, save_app: false}
-          - {app: Miner3D, scheme: Miner3D-Mac, save_app: true}
-          - {app: Miner3D, scheme: Miner3D-iOS, save_app: false}
-          - {app: QuicksilverPennies, scheme: QuicksilverPennies-Mac, save_app: true}
+        app: ${{ fromJSON(inputs.games == 'lastcar' && '["lastcar"]' || inputs.games == 'miner' && '["miner"]' || '["lastcar","miner"]') }}
     env:
       APP_KEY: ${{ matrix.app }}
-      SCHEME: ${{ matrix.scheme }}
-      SAVE_APP: ${{ matrix.save_app }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          persist-credentials: false
-          sparse-checkout: apple-port/${{ matrix.app }}
-      - name: Prepare native build tools
+      - name: Prepare the Xcode runner
         run: |
           set -euo pipefail
+          # runner.temp is not allowed in a job-level env (GitHub refused the dispatch, HTTP 422); set it here. Claude (Command), Nov 26 2026.
+          echo "P8_SOURCE=$RUNNER_TEMP/apple-source" >> "$GITHUB_ENV"
           xcodebuild -version
-          brew install xcodegen
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography==50.0.1
-      - name: Decrypt verified game payload
+          command -v xcodegen || brew install xcodegen
+          python3 -m venv "$RUNNER_TEMP/p8env"
+          "$RUNNER_TEMP/p8env/bin/pip" install --quiet cryptography==50.0.1 Pillow==13.0.0
+      - name: Decrypt and check the exact release inputs
+        id: payload
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+          GH_TOKEN: ${{ github.token }}
+          DISPATCH_GAMES: ${{ inputs.games }}
+          DISPATCH_OWNER_WORD: ${{ inputs.owner_word }}
         run: |
           set -euo pipefail
-          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
+          curl --fail --silent --show-error --retry 2 \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/contents/apple-port/ios-p8-20261125/ios_crypto.py?ref=$GITHUB_SHA" \
+            -o "$RUNNER_TEMP/ios_crypto.py"
+          "$RUNNER_TEMP/p8env/bin/python" "$RUNNER_TEMP/ios_crypto.py" receive "$P8_SOURCE"
+          cmp "$RUNNER_TEMP/ios_crypto.py" "$P8_SOURCE/release/ios_crypto.py"
+          "$RUNNER_TEMP/p8env/bin/python" - <<'PY'
           from pathlib import Path
-          from zipfile import ZipFile
-          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-          segments = sorted((Path('apple-port') / os.environ['APP_KEY']).glob('*.aesgcm'))
-          if not segments:
-              raise ValueError('No encrypted source segments')
-          root = (Path(os.environ['RUNNER_TEMP']) / 'apple-source').resolve()
-          root.mkdir()
-          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          archive = root.parent / 'source.zip'
-          with archive.open('wb') as output:
-              for index, path in enumerate(segments):
-                  if path.stem != f'{index:03d}':
-                      raise ValueError('Invalid segment index')
-                  data = path.read_bytes()
-                  context = f"{os.environ['APP_KEY']}:{index}".encode()
-                  output.write(cipher.decrypt(data[:12], data[12:], context))
-          with ZipFile(archive) as package:
-              for name in package.namelist():
-                  if not (root / name).resolve().is_relative_to(root):
-                      raise ValueError('Source entry is outside its directory')
-              package.extractall(root)
+          import json, os, re
+          plan = json.loads((Path(os.environ['P8_SOURCE'])/'release/plan.json').read_bytes())
+          games = os.environ['DISPATCH_GAMES'].split(',')
+          apps = plan['apps']
+          if games != plan['games'] or set(games) != apps.keys() or os.environ['APP_KEY'] not in apps:
+              raise SystemExit('Dispatch games do not match the staged overlay.')
+          word = os.environ['DISPATCH_OWNER_WORD']
+          upload = plan['upload_to_apple']
+          if upload:
+              if word != plan['owner_word'] or not re.fullmatch(r'(desk-hotline-|owner-relay-|hub-)[A-Za-z0-9-]+', word):
+                  raise SystemExit('Upload policy mismatch. -Upload needs the exact owner word.')
+              if 'lastcar' in apps and apps['lastcar']['version'] != '1.0.15':
+                  raise SystemExit('Upload requires Last Car 1.0.15.')
+              if 'miner' in apps and (apps['miner']['version'], apps['miner']['build']) != ('3.26', '28'):
+                  raise SystemExit('Upload requires Miner 3.26 (28).')
+          elif word:
+              raise SystemExit('Build-only overlay must use a build-only dispatch.')
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              print('upload=' + str(upload).lower(), file=output)
           PY
-      - name: Compile and verify packaged game resources
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/apple-source"
-          product="$root/build/$SCHEME/products/$APP_KEY.app"
-          bash "$root/build-unsigned.sh" "$SCHEME" > "$RUNNER_TEMP/compile.log" 2>&1
-          if [[ "$SAVE_APP" == true ]]; then
-            ditto -c -k --keepParent "$product" "$RUNNER_TEMP/unsigned-app.zip"
-          fi
-          echo "Xcode compiled $SCHEME and verified the bundled payload."
-      - name: Encrypt build and diagnostics
+      - name: Exercise two iPhones, archive and verify the signed IPA
+        env:
+          APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+          APPLE_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_P12_PASSWORD }}
+        run: '"$RUNNER_TEMP/p8env/bin/python" "$P8_SOURCE/release/run_ios.py" build'
+      - name: Validate and upload on the owner word
+        if: ${{ steps.payload.outputs.upload == 'true' }}
+        env:
+          APPLE_STORE_CONNECT_PRIVATE_KEY: ${{ secrets.APPLE_STORE_CONNECT_PRIVATE_KEY }}
+          APPLE_STORE_CONNECT_KEY_ID: ${{ secrets.APPLE_STORE_CONNECT_KEY_ID }}
+          APPLE_STORE_CONNECT_ISSUER_ID: ${{ secrets.APPLE_STORE_CONNECT_ISSUER_ID }}
+        run: '"$RUNNER_TEMP/p8env/bin/python" "$P8_SOURCE/release/run_ios.py" upload'
+      - name: Encrypt signed packages and simulator evidence
         if: always()
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
         run: |
           set -euo pipefail
-          if [[ ! -x "$RUNNER_TEMP/cryptoenv/bin/python" ]]; then exit 0; fi
-          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
-          from pathlib import Path
-          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-          root = Path(os.environ['RUNNER_TEMP'])
-          cipher = AESGCM(bytes.fromhex(os.environ['IPA_KEY_HEX']))
-          for name in ['unsigned-app.zip', 'compile.log']:
-              path = root / name
-              if path.is_file():
-                  nonce = os.urandom(12)
-                  (root / f'{name}.aesgcm').write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
-          PY
+          if [[ -f "$RUNNER_TEMP/ios_crypto.py" && -x "$RUNNER_TEMP/p8env/bin/python" ]]; then
+            "$RUNNER_TEMP/p8env/bin/python" "$RUNNER_TEMP/ios_crypto.py" artifacts "$RUNNER_TEMP/release-output" "$RUNNER_TEMP/encrypted-release"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: ${{ matrix.scheme }}-encrypted
-          path: ${{ runner.temp }}/*.aesgcm
-          retention-days: 1
+          name: p8-${{ matrix.app }}-encrypted
+          path: ${{ runner.temp }}/encrypted-release/*.aesgcm
+          retention-days: 7
           if-no-files-found: ignore
+
