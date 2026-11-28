@@ -1,77 +1,62 @@
-name: iOS device build
-on:
-  workflow_dispatch:
-    inputs:
-      source_ref:
-        description: Private source revision
-        required: true
-        default: main
+name: Encrypted iPhone build check
+on: workflow_dispatch
+permissions:
+  contents: read
 jobs:
-  build:
-    runs-on: macos-15
-    timeout-minutes: 30
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 27
     steps:
-      - name: Checkout private source
-        uses: actions/checkout@v4
+      - name: Check out encrypted build input
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          repository: dot0m0peg-arch/SophiasSightWordsApple-device-build
-          ref: ${{ inputs.source_ref }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
           persist-credentials: false
-          path: source
-      - name: Build unsigned device app
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd source
-          swift test > "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          xcodebuild \
-            -project SophiasSightWords.xcodeproj \
-            -scheme SophiasSightWords \
-            -configuration Debug \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -derivedDataPath "$RUNNER_TEMP/derived" \
-            CODE_SIGNING_ALLOWED=NO \
-            build >> "$RUNNER_TEMP/xcodebuild.log" 2>&1
-          mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          cp -R "$RUNNER_TEMP/derived/Build/Products/Debug-iphoneos/SophiasSightWords.app" "$RUNNER_TEMP/ipa/Payload/"
-          cd "$RUNNER_TEMP/ipa"
-          zip -qry "$RUNNER_TEMP/SophiasSightWords-unsigned.ipa" Payload
-      - name: Encrypt output and diagnostics
-        if: always()
-        shell: bash
+      - name: Open input
         env:
           IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        shell: bash
         run: |
           set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/cryptoenv"
-          "$RUNNER_TEMP/cryptoenv/bin/pip" install --quiet cryptography
-          "$RUNNER_TEMP/cryptoenv/bin/python" - <<'PY'
-          import os
-          from pathlib import Path
+          python3 -m venv "$RUNNER_TEMP/cipher"
+          "$RUNNER_TEMP/cipher/bin/pip" -q install cryptography==50.0.1
+          "$RUNNER_TEMP/cipher/bin/python" - <<'PY'
+          import io, os, pathlib, zipfile
           from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-          root = Path(os.environ["RUNNER_TEMP"])
-          cipher = AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"]))
-          for name in ("SophiasSightWords-unsigned.ipa", "xcodebuild.log"):
-              path = root / name
-              if path.exists():
-                  nonce = os.urandom(12)
-                  (root / (name + ".aesgcm")).write_bytes(nonce + cipher.encrypt(nonce, path.read_bytes(), None))
+          data=pathlib.Path("build-input.aesgcm").read_bytes()
+          payload=AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"])).decrypt(data[:12],data[12:],None)
+          with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+              archive.extractall(pathlib.Path(os.environ["RUNNER_TEMP"])/"candidate")
           PY
-      - name: Upload encrypted IPA
+      - name: Compile and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/proof"
+          bash "$RUNNER_TEMP/candidate/tools/verify-mac.sh" "$RUNNER_TEMP/proof" > "$RUNNER_TEMP/proof/steps.log" 2>&1
+      - name: Seal output and diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: encrypted-ipa
-          path: ${{ runner.temp }}/SophiasSightWords-unsigned.ipa.aesgcm
-          if-no-files-found: ignore
-          retention-days: 1
-      - name: Upload encrypted diagnostics
+        env:
+          IPA_KEY_HEX: ${{ secrets.IPA_KEY_HEX }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/cipher/bin/python" - <<'PY'
+          import hashlib, io, json, os, pathlib, zipfile
+          from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+          temp=pathlib.Path(os.environ["RUNNER_TEMP"]); proof=temp/"proof"
+          output=io.BytesIO()
+          with zipfile.ZipFile(output,"w",zipfile.ZIP_DEFLATED) as z:
+              for pattern in ("*.log","xcode.txt","Loam-unsigned-device.ipa","native-save.json","probe.json","attachments/*"):
+                  for item in proof.glob(pattern):
+                      if item.is_file(): z.write(item,item.relative_to(proof))
+          nonce=os.urandom(12)
+          (temp/"results.aesgcm").write_bytes(nonce+AESGCM(bytes.fromhex(os.environ["IPA_KEY_HEX"])).encrypt(nonce,output.getvalue(),None))
+          PY
+      - name: Deliver encrypted evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: encrypted-build-log
-          path: ${{ runner.temp }}/xcodebuild.log.aesgcm
-          if-no-files-found: ignore
+          name: encrypted-results
+          path: ${{ runner.temp }}/results.aesgcm
+          if-no-files-found: error
           retention-days: 1
